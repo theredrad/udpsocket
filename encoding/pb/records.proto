@@ -1,0 +1,25 @@
+syntax = "proto3";
+package pb;
+
+option go_package = ".;pb";
+
+message Handshake {
+  string client_version = 1;
+  bytes cipher_suites = 2;
+  bytes session_id = 3;
+  bytes random = 4;
+  bytes cookie = 5;
+  bytes token = 6;
+  bytes key = 7;
+  int64 timestamp = 8;
+}
+
+message Ping {
+  int64 sent_at = 1;
+}
+
+message Pong {
+  int64 ping_sent_at = 1;
+  int64 received_at = 2;
+  int64 sent_at = 3;
+}
