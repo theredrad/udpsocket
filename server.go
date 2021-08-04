@@ -8,11 +8,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/theredrad/udpsocket/crypto"
+	"github.com/theredrad/udpsocket/encoding"
+	"github.com/theredrad/udpsocket/encoding/pb"
 	"net"
 	"time"
-	"udpsocket/crypto"
-	"udpsocket/encoding"
-	"udpsocket/encoding/pb"
 )
 
 // HandlerFunc is called when a custom message type is received from the client

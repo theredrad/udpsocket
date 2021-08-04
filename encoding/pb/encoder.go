@@ -3,7 +3,7 @@ package pb
 import (
 	"errors"
 	"github.com/golang/protobuf/proto"
-	"udpsocket/encoding"
+	"github.com/theredrad/udpsocket/encoding"
 )
 
 var (

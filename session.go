@@ -2,8 +2,8 @@ package udpsocket
 
 import (
 	"crypto/rand"
+	"github.com/theredrad/udpsocket/crypto"
 	"net"
-	"udpsocket/crypto"
 )
 
 // A struct to manage sessions secrets

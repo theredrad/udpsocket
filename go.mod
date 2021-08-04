@@ -1,4 +1,4 @@
-module udpsocket
+module github.com/theredrad/udpsocket
 
 go 1.16
 
