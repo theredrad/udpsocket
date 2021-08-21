@@ -40,6 +40,8 @@ const (
 
 	// default RSA key size, this config is used to initiate new RSA implementation if no asymmetric encryption is passed
 	defaultRSAKeySize int = 2048
+	defaultMinimumPayloadSize int = 3
+	defaultReadBufferSize int = 2048
 
 	// A symmetric key smaller than 256 bits is not secure. 256-bits = 32 bytes in size
 	insecureSymmKeySize int = 32
@@ -132,6 +134,14 @@ type Server struct {
 func NewServer(conn *net.UDPConn, config *Config) (*Server, error) {
 	if config == nil {
 		config = &Config{}
+	}
+
+	if config.ReadBufferSize == 0 {
+		config.ReadBufferSize = defaultReadBufferSize
+	}
+
+	if config.MinimumPayloadSize == 0 {
+		config.MinimumPayloadSize = defaultMinimumPayloadSize
 	}
 
 	config.protocolVersion = [2]byte{config.ProtocolVersionMajor, config.ProtocolVersionMinor}
