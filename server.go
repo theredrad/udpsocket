@@ -40,6 +40,8 @@ const (
 
 	// default RSA key size, this config is used to initiate new RSA implementation if no asymmetric encryption is passed
 	defaultRSAKeySize int = 2048
+	defaultMinimumPayloadSize int = 3
+	defaultReadBufferSize int = 2048
 
 	// A symmetric key smaller than 256 bits is not secure. 256-bits = 32 bytes in size
 	insecureSymmKeySize int = 32
@@ -120,6 +122,9 @@ type Server struct {
 	// Map of client with index of IP_PORT
 	sessions map[string]*Client
 
+	// stop channel to stop listening
+	stop chan bool
+
 	// Channel of server errors
 	Errors chan error
 }
@@ -129,6 +134,14 @@ type Server struct {
 func NewServer(conn *net.UDPConn, config *Config) (*Server, error) {
 	if config == nil {
 		config = &Config{}
+	}
+
+	if config.ReadBufferSize == 0 {
+		config.ReadBufferSize = defaultReadBufferSize
+	}
+
+	if config.MinimumPayloadSize == 0 {
+		config.MinimumPayloadSize = defaultMinimumPayloadSize
 	}
 
 	config.protocolVersion = [2]byte{config.ProtocolVersionMajor, config.ProtocolVersionMinor}
@@ -165,6 +178,8 @@ func NewServer(conn *net.UDPConn, config *Config) (*Server, error) {
 		clients:  make(map[string]*Client),
 		sessions: make(map[string]*Client),
 
+		stop: make(chan bool, 1),
+
 		Errors: make(chan error),
 	}, nil
 }
@@ -175,16 +190,29 @@ func (s *Server) SetHandler(f HandlerFunc) {
 }
 
 // Start listening to the UDP port for incoming bytes & then pass it to the handleRecord method if no error is found
-func (s *Server) Serve() chan error {
-	buf := make([]byte, s.config.ReadBufferSize)
+func (s *Server) Serve() {
 	for {
-		n, addr, err := s.conn.ReadFromUDP(buf)
-		if err != nil {
-			s.Errors <- err
-			continue
+		select {
+		case <-s.stop:
+			return
+		default:
+			buf := make([]byte, s.config.ReadBufferSize)
+			n, addr, err := s.conn.ReadFromUDP(buf)
+			if err != nil {
+				if errors.Is(err, net.ErrClosed) {
+					continue
+				}
+
+				s.Errors <- err
+				continue
+			}
+			go s.handleRecord(buf[0:n], addr)
 		}
-		go s.handleRecord(buf[0:n], addr)
 	}
+}
+
+func (s *Server) Stop() {
+	close(s.stop)
 }
 
 // handlerRecord validate & parse incoming bytes to a record instance, then process it depends on the record type
