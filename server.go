@@ -32,11 +32,12 @@ var (
 
 const (
 	// reserved record types
-	HandshakeClientHelloRecordType byte = 1
-	HandshakeHelloVerifyRecordType byte = 2
-	HandshakeServerHelloRecordType byte = 3
-	PingRecordType                 byte = 4
-	PongRecordType                 byte = 5
+	HandshakeClientHelloRecordType byte = iota + 1
+	HandshakeHelloVerifyRecordType
+	HandshakeServerHelloRecordType
+	PingRecordType
+	PongRecordType
+	UnAuthenticated
 
 	// default RSA key size, this config is used to initiate new RSA implementation if no asymmetric encryption is passed
 	defaultRSAKeySize int = 2048
@@ -364,6 +365,7 @@ func (s *Server) handleRecord(record []byte, addr *net.UDPAddr) {
 
 		if !cl.ValidateSessionID(sessionID) {
 			s.Errors <- fmt.Errorf("error while validating session id for ping: %w", ErrClientSessionNotFound)
+			s.unAuthenticated(addr)
 			return
 		}
 
@@ -394,6 +396,7 @@ func (s *Server) handleRecord(record []byte, addr *net.UDPAddr) {
 		cl, ok := s.findClientByAddr(addr)
 		if !ok {
 			s.Errors <- fmt.Errorf("error while authenticating other type record: %w", ErrClientAddressIsNotRegistered)
+			s.unAuthenticated(addr)
 			return
 		}
 
@@ -413,6 +416,7 @@ func (s *Server) handleRecord(record []byte, addr *net.UDPAddr) {
 
 		if !cl.ValidateSessionID(sessionID) {
 			s.Errors <- fmt.Errorf("error while validating client session for other type record: %w", ErrClientSessionNotFound)
+			s.unAuthenticated(addr)
 			return
 		}
 
@@ -515,6 +519,15 @@ func (s *Server) BroadcastToClients(typ byte, payload []byte) {
 				s.Errors <- err
 			}
 		}()
+	}
+}
+
+func (s *Server) unAuthenticated(addr *net.UDPAddr) {
+	payload := composeRecordBytes(UnAuthenticated, s.config.protocolVersion, []byte{})
+	err := s.sendToAddr(addr, payload)
+	if err != nil {
+		s.Errors <- fmt.Errorf("error while sending UnAuthenticated record to the client: %w", err)
+		return
 	}
 }
 
