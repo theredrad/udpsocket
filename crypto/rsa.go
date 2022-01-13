@@ -6,6 +6,7 @@ import (
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha1"
 	"crypto/x509"
 	"encoding/pem"
 )
@@ -59,6 +60,20 @@ func (c *RSACrypto) Decrypt(cipher []byte) ([]byte, error) {
 // Returns public key bytes
 func (c *RSACrypto) GetPublicKey() []byte {
 	return c.privateKey.PublicKey.N.Bytes()
+}
+
+type RSAEncryptor struct {
+	pk *rsa.PublicKey
+}
+
+func NewRSAEncryptorFromPK(key *rsa.PublicKey) *RSAEncryptor {
+	return &RSAEncryptor{
+		pk: key,
+	}
+}
+
+func (c *RSAEncryptor) Encrypt(payload []byte) ([]byte, error) {
+	return rsa.EncryptOAEP(sha1.New(), rand.Reader, c.pk, payload, nil)
 }
 
 // Generates a new RSA key by the given size
