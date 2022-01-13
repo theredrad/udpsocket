@@ -234,7 +234,8 @@ func (s *Server) Serve() {
 }
 
 func (s *Server) Stop() {
-	close(s.stop)
+	s.conn.Close()
+	s.stop <- true
 	s.garbageCollectionStop <- true
 }
 
