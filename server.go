@@ -210,12 +210,15 @@ func (s *Server) Serve() {
 			s.garbageCollectionTicker.Stop()
 		}
 		s.garbageCollectionTicker = time.NewTicker(s.config.HeartbeatExpiration)
+		s.garbageCollectionStop = make(chan bool, 1)
 		go s.clientGarbageCollection()
 	}
 
+	s.conn.SetReadDeadline(time.Time{}) // reset read deadline @TODO: handle error
+	s.stop = make(chan bool, 1)         // reset the stop channel
 	for {
 		select {
-		case <-s.stop:
+		case _ = <-s.stop:
 			return
 		default:
 			buf := make([]byte, s.config.ReadBufferSize)
@@ -234,7 +237,7 @@ func (s *Server) Serve() {
 }
 
 func (s *Server) Stop() {
-	s.conn.Close()
+	s.conn.SetReadDeadline(time.Unix(0, 1)) // set read deadline to a longtime ago @TODO: handle error
 	s.stop <- true
 	s.garbageCollectionStop <- true
 }

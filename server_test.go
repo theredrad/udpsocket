@@ -519,6 +519,20 @@ func TestServer_Stop(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name: "continuous_start_stop",
+			preFunc: func() {
+				go server.Serve()
+				time.Sleep(200 * time.Millisecond)
+				server.Stop()
+				time.Sleep(200 * time.Millisecond)
+				go server.Serve()
+			},
+			postFunc: func() {
+				server.Stop()
+			},
+			wantErr: false,
+		},
 	}
 
 	clientConn, clientClose := listenUDP(t, clientAddr)
