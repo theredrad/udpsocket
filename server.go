@@ -12,6 +12,7 @@ import (
 	"github.com/theredrad/udpsocket/encoding"
 	"github.com/theredrad/udpsocket/encoding/pb"
 	"net"
+	"sync"
 	"time"
 )
 
@@ -72,6 +73,8 @@ type Client struct {
 
 	// Last time that a record is received from the client
 	lastHeartbeat *time.Time
+
+	sync.Mutex
 }
 
 // Server config
@@ -97,6 +100,9 @@ type Config struct {
 	// Minimum payload size to ignore too short incoming bytes
 	MinimumPayloadSize int
 
+	// Expiration time of last heartbeat to delete client
+	HeartbeatExpiration time.Duration
+
 	// Protocol major version
 	ProtocolVersionMajor uint8
 
@@ -119,6 +125,12 @@ type Server struct {
 
 	// Map of client with index of client ID
 	clients map[string]*Client
+
+	// Client garbage collector ticker
+	garbageCollectionTicker *time.Ticker
+
+	// Client garbage collector stop channel
+	garbageCollectionStop chan bool
 
 	// Map of client with index of IP_PORT
 	sessions map[string]*Client
@@ -179,7 +191,8 @@ func NewServer(conn *net.UDPConn, config *Config) (*Server, error) {
 		clients:  make(map[string]*Client),
 		sessions: make(map[string]*Client),
 
-		stop: make(chan bool, 1),
+		garbageCollectionStop: make(chan bool, 1),
+		stop:                  make(chan bool, 1),
 
 		Errors: make(chan error),
 	}, nil
@@ -192,6 +205,14 @@ func (s *Server) SetHandler(f HandlerFunc) {
 
 // Start listening to the UDP port for incoming bytes & then pass it to the handleRecord method if no error is found
 func (s *Server) Serve() {
+	if s.config.HeartbeatExpiration > 0 {
+		if s.garbageCollectionTicker != nil {
+			s.garbageCollectionTicker.Stop()
+		}
+		s.garbageCollectionTicker = time.NewTicker(s.config.HeartbeatExpiration)
+		go s.clientGarbageCollection()
+	}
+
 	for {
 		select {
 		case <-s.stop:
@@ -214,6 +235,7 @@ func (s *Server) Serve() {
 
 func (s *Server) Stop() {
 	close(s.stop)
+	s.garbageCollectionStop <- true
 }
 
 // handlerRecord validate & parse incoming bytes to a record instance, then process it depends on the record type
@@ -392,6 +414,11 @@ func (s *Server) handleRecord(record []byte, addr *net.UDPAddr) {
 			return
 		}
 
+		now := time.Now()
+		cl.Lock()
+		cl.lastHeartbeat = &now
+		cl.Unlock()
+
 	default:
 		cl, ok := s.findClientByAddr(addr)
 		if !ok {
@@ -423,6 +450,11 @@ func (s *Server) handleRecord(record []byte, addr *net.UDPAddr) {
 		if s.handler != nil {
 			s.handler(cl.ID, r.Type, body)
 		}
+
+		now := time.Now()
+		cl.Lock()
+		cl.lastHeartbeat = &now
+		cl.Unlock()
 	}
 }
 
@@ -441,11 +473,13 @@ func (s *Server) registerClient(addr *net.UDPAddr, ID string, eKey []byte) (*Cli
 		return nil, err
 	}
 
+	now := time.Now()
 	cl := &Client{
 		ID:        ID,
 		sessionID: sessionID,
 		addr:      addr,
 		eKey:      eKey,
+		lastHeartbeat: &now,
 	}
 	s.clients[ID] = cl
 	s.sessions[fmt.Sprintf("%s_%d", addr.IP.String(), addr.Port)] = cl
@@ -507,6 +541,25 @@ func (s *Server) SendToClientByID(clientID string, typ byte, payload []byte) err
 	}
 
 	return s.sendToClient(cl, typ, payload)
+}
+
+func (s *Server) clientGarbageCollection() {
+	for {
+		select {
+		case <-s.garbageCollectionStop:
+			if s.garbageCollectionTicker != nil {
+				s.garbageCollectionTicker.Stop()
+			}
+			break
+		case <-s.garbageCollectionTicker.C:
+			for _, c := range s.clients {
+				if c.lastHeartbeat != nil && time.Now().After(c.lastHeartbeat.Add(s.config.HeartbeatExpiration)) {
+					delete(s.clients, c.ID)
+					delete(s.sessions, fmt.Sprintf("%s_%d", c.addr.IP.String(), c.addr.Port))
+				}
+			}
+		}
+	}
 }
 
 // a method to broadcast byte array to all registered Clients

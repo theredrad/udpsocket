@@ -235,7 +235,7 @@ For `Ping` record, the server immidiently sends a `Pong` record to the client.
 
 ## TODO
 
-- [ ] Update client lastHeartBeat to close the connection on timeout (delete the client to prevent sending message on the broadcast) 
+- [x] Update client lastHeartBeat to close the connection on timeout (delete the client to prevent sending message on the broadcast) 
 - [ ] Check the client random bytes for all zero value
 - [ ] Add tests
 - [ ] Check the client AES key strength
