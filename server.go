@@ -41,9 +41,9 @@ const (
 	UnAuthenticated
 
 	// default RSA key size, this config is used to initiate new RSA implementation if no asymmetric encryption is passed
-	defaultRSAKeySize int = 2048
+	defaultRSAKeySize         int = 2048
 	defaultMinimumPayloadSize int = 3
-	defaultReadBufferSize int = 2048
+	defaultReadBufferSize     int = 2048
 
 	// A symmetric key smaller than 256 bits is not secure. 256-bits = 32 bytes in size
 	insecureSymmKeySize int = 32
@@ -476,10 +476,10 @@ func (s *Server) registerClient(addr *net.UDPAddr, ID string, eKey []byte) (*Cli
 
 	now := time.Now()
 	cl := &Client{
-		ID:        ID,
-		sessionID: sessionID,
-		addr:      addr,
-		eKey:      eKey,
+		ID:            ID,
+		sessionID:     sessionID,
+		addr:          addr,
+		eKey:          eKey,
 		lastHeartbeat: &now,
 	}
 	s.clients[ID] = cl
