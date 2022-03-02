@@ -166,6 +166,7 @@ c: record protocol minor version
 d: record body
 ```
 
+You may ask why the RSA encrypted message size is prepended to the record while the RSA private key size is known and the encrypted message size is calculatable. The `Server` actually uses `Asymmetric` interface for encryption and the RSA implements it, so maybe in other implementations, the encrypted message size, doesn't follow the private key size, thus we need to pass the encrypted message size in handshaking to be able separate the AES encrypted and RSA encrypted sections.
 
 
 ### Record types
