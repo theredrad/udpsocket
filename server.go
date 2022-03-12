@@ -563,13 +563,12 @@ func (s *Server) clientGarbageCollection() {
 // a method to broadcast byte array to all registered Clients
 func (s *Server) BroadcastToClients(typ byte, payload []byte) {
 	for _, cl := range s.clients {
-		client := cl
-		go func() {
-			err := s.sendToClient(client, typ, payload)
+		go func(c *Client) {
+			err := s.sendToClient(c, typ, payload)
 			if err != nil {
 				s.logger.Printf("error while writing to the client: %s", err)
 			}
-		}()
+		}(cl)
 	}
 }
 
