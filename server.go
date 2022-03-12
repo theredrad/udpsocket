@@ -11,6 +11,8 @@ import (
 	"github.com/theredrad/udpsocket/crypto"
 	"github.com/theredrad/udpsocket/encoding"
 	"github.com/theredrad/udpsocket/encoding/pb"
+	"io/ioutil"
+	"log"
 	"net"
 	"sync"
 	"time"
@@ -126,11 +128,11 @@ type Server struct {
 	// stop channel to stop listening
 	stop chan bool
 
-	// Channel of server errors
-	Errors chan error
-
 	// Protocol version
 	protocolVersion [2]byte
+
+	// Logger
+	logger *log.Logger
 }
 
 // NewServer accepts UDP connection & configs & returns a new instance of the Server
@@ -144,8 +146,6 @@ func NewServer(conn *net.UDPConn, options ...Option) (*Server, error) {
 
 		garbageCollectionStop: make(chan bool, 1),
 		stop:                  make(chan bool, 1),
-
-		Errors: make(chan error),
 	}
 
 	for _, opt := range options {
@@ -185,6 +185,10 @@ func NewServer(conn *net.UDPConn, options ...Option) (*Server, error) {
 		return nil, err
 	}
 
+	if s.logger == nil { // discard logging if no logger is set
+		s.logger = log.New(ioutil.Discard, "", 0)
+	}
+
 	return &s, nil
 }
 
@@ -218,7 +222,7 @@ func (s *Server) Serve() {
 					continue
 				}
 
-				s.Errors <- err
+				s.logger.Printf("error while reading from udp: %s", err)
 				continue
 			}
 			go s.handleRecord(buf[0:n], addr)
@@ -243,13 +247,13 @@ func (s *Server) Stop() {
 // if a ping record is received, the server sends a pong record immediately
 func (s *Server) handleRecord(record []byte, addr *net.UDPAddr) {
 	if len(record) < s.minimumPayloadSize {
-		s.Errors <- ErrMinimumPayloadSizeLimit
+		s.logger.Println(ErrMinimumPayloadSizeLimit)
 		return
 	}
 
 	r, err := parseRecord(record)
 	if err != nil {
-		s.Errors <- err
+		s.logger.Printf("error while parsing record: %s", err)
 		return
 	}
 
@@ -258,14 +262,14 @@ func (s *Server) handleRecord(record []byte, addr *net.UDPAddr) {
 		var payload []byte
 		payload, err = s.asymmCrypto.Decrypt(r.Body)
 		if err != nil {
-			s.Errors <- err
+			s.logger.Printf("error while decrypting record body: %s", err)
 			return
 		}
 
 		var handshake encoding.HandshakeRecord
 		handshake, err = s.transcoder.UnmarshalHandshake(payload)
 		if err != nil {
-			s.Errors <- fmt.Errorf("error while unmarshaling ClientHello record: %w", err)
+			s.logger.Printf("error while unmarshaling ClientHello record: %s", err)
 			return
 		}
 
@@ -275,7 +279,7 @@ func (s *Server) handleRecord(record []byte, addr *net.UDPAddr) {
 			cookie := s.sessionManager.GetAddrCookieHMAC(addr, []byte(handshake.GetClientVersion()), handshake.GetSessionId(), handshake.GetRandom()) //TODO session id is empty
 
 			if len(handshake.GetKey()) < insecureSymmKeySize {
-				s.Errors <- fmt.Errorf("error while parsing ClientHello record: %w", ErrInsecureEncryptionKeySize)
+				s.logger.Printf("error while parsing ClientHello record: %s", ErrInsecureEncryptionKeySize)
 				return
 			}
 
@@ -286,13 +290,13 @@ func (s *Server) handleRecord(record []byte, addr *net.UDPAddr) {
 			var handshakePayload []byte
 			handshakePayload, err = s.transcoder.MarshalHandshake(serverHandshakeVerify)
 			if err != nil {
-				s.Errors <- fmt.Errorf("error while creating HelloVerify record: %w", err)
+				s.logger.Printf("error while creating HelloVerify record: %s", err)
 				return
 			}
 
 			handshakePayload, err = s.symmCrypto.Encrypt(handshakePayload, handshake.GetKey())
 			if err != nil {
-				s.Errors <- fmt.Errorf("error while encrypting HelloVerify record: %w", err)
+				s.logger.Printf("error while encrypting HelloVerify record: %s", err)
 				return
 			}
 
@@ -300,18 +304,18 @@ func (s *Server) handleRecord(record []byte, addr *net.UDPAddr) {
 
 			err = s.sendToAddr(addr, handshakePayload)
 			if err != nil {
-				s.Errors <- fmt.Errorf("error while sending HelloVerify record to the client: %w", err)
+				s.logger.Printf("error while sending HelloVerify record to the client: %s", err)
 				return
 			}
 		} else {
 			cookie := s.sessionManager.GetAddrCookieHMAC(addr, []byte(handshake.GetClientVersion()), handshake.GetSessionId(), handshake.GetRandom()) //TODO session id is empty
 			if !crypto.HMACEqual(handshake.GetCookie(), cookie) {
-				s.Errors <- fmt.Errorf("error while validation HelloVerify record cookie: %w", ErrClientCookieIsInvalid)
+				s.logger.Printf("error while validation HelloVerify record cookie: %s", ErrClientCookieIsInvalid)
 				return
 			}
 
 			if len(handshake.GetKey()) < insecureSymmKeySize {
-				s.Errors <- fmt.Errorf("error while validating HelloVerify record key: %w", ErrInsecureEncryptionKeySize)
+				s.logger.Printf("error while validating HelloVerify record key: %s", ErrInsecureEncryptionKeySize)
 				return
 			}
 
@@ -319,7 +323,7 @@ func (s *Server) handleRecord(record []byte, addr *net.UDPAddr) {
 			if len(r.Extra) > 0 {
 				token, err = s.symmCrypto.Decrypt(r.Extra, handshake.GetKey())
 				if err != nil {
-					s.Errors <- fmt.Errorf("error while decrypting HelloVerify record token: %w", err)
+					s.logger.Printf("error while decrypting HelloVerify record token: %s", err)
 					return
 				}
 			}
@@ -327,14 +331,14 @@ func (s *Server) handleRecord(record []byte, addr *net.UDPAddr) {
 			var ID string
 			ID, err = s.authClient.Authenticate(context.Background(), token)
 			if err != nil {
-				s.Errors <- fmt.Errorf("error while authenticating client token: %w", err)
+				s.logger.Printf("error while authenticating client token: %s", err)
 				return
 			}
 
 			var cl *Client
 			cl, err = s.registerClient(addr, ID, handshake.GetKey())
 			if err != nil {
-				s.Errors <- fmt.Errorf("error while registering client: %w", err)
+				s.logger.Printf("error while registering client: %s", err)
 				return
 			}
 
@@ -345,20 +349,20 @@ func (s *Server) handleRecord(record []byte, addr *net.UDPAddr) {
 			var handshakePayload []byte
 			handshakePayload, err = s.transcoder.MarshalHandshake(serverHandshakeHello)
 			if err != nil {
-				s.Errors <- fmt.Errorf("error while marshaling server hello record: %w", err)
+				s.logger.Printf("error while marshaling server hello record: %s", err)
 				return
 			}
 
 			err = s.sendToClient(cl, HandshakeServerHelloRecordType, handshakePayload)
 			if err != nil {
-				s.Errors <- fmt.Errorf("error while sending server hello record: %w", err)
+				s.logger.Printf("error while sending server hello record: %s", err)
 				return
 			}
 		}
 	case PingRecordType:
 		cl, ok := s.findClientByAddr(addr)
 		if !ok {
-			s.Errors <- fmt.Errorf("error while authenticating ping record: %w", ErrClientAddressIsNotRegistered)
+			s.logger.Printf("error while authenticating ping record: %s", ErrClientAddressIsNotRegistered)
 			return
 		}
 
@@ -368,19 +372,19 @@ func (s *Server) handleRecord(record []byte, addr *net.UDPAddr) {
 		var payload []byte
 		payload, err = s.symmCrypto.Decrypt(r.Body, cl.eKey)
 		if err != nil {
-			s.Errors <- fmt.Errorf("error while decrypting ping record: %w", err)
+			s.logger.Printf("error while decrypting ping record: %s", err)
 			return
 		}
 
 		var sessionID, body []byte
 		sessionID, body, err = parseSessionID(payload, len(cl.sessionID))
 		if err != nil {
-			s.Errors <- fmt.Errorf("error while parsing session id for ping: %w", err)
+			s.logger.Printf("error while parsing session id for ping: %s", err)
 			return
 		}
 
 		if !cl.ValidateSessionID(sessionID) {
-			s.Errors <- fmt.Errorf("error while validating session id for ping: %w", ErrClientSessionNotFound)
+			s.logger.Printf("error while validating session id for ping: %s", ErrClientSessionNotFound)
 			s.unAuthenticated(addr)
 			return
 		}
@@ -388,7 +392,7 @@ func (s *Server) handleRecord(record []byte, addr *net.UDPAddr) {
 		var ping encoding.PingRecord
 		ping, err = s.transcoder.UnmarshalPing(body)
 		if err != nil {
-			s.Errors <- fmt.Errorf("error while unmarshaling ping record: %w", err)
+			s.logger.Printf("error while unmarshaling ping record: %s", err)
 			return
 		}
 
@@ -398,13 +402,13 @@ func (s *Server) handleRecord(record []byte, addr *net.UDPAddr) {
 		var pongPayload []byte
 		pongPayload, err = s.transcoder.MarshalPong(pong)
 		if err != nil {
-			s.Errors <- fmt.Errorf("error while marshaling pong record: %w", err)
+			s.logger.Printf("error while marshaling pong record: %s", err)
 			return
 		}
 
 		err = s.sendToClient(cl, PongRecordType, pongPayload)
 		if err != nil {
-			s.Errors <- fmt.Errorf("error while sending pong record: %w", err)
+			s.logger.Printf("error while sending pong record: %s", err)
 			return
 		}
 
@@ -416,7 +420,7 @@ func (s *Server) handleRecord(record []byte, addr *net.UDPAddr) {
 	default:
 		cl, ok := s.findClientByAddr(addr)
 		if !ok {
-			s.Errors <- fmt.Errorf("error while authenticating other type record: %w", ErrClientAddressIsNotRegistered)
+			s.logger.Printf("error while authenticating other type record: %s", ErrClientAddressIsNotRegistered)
 			s.unAuthenticated(addr)
 			return
 		}
@@ -424,19 +428,19 @@ func (s *Server) handleRecord(record []byte, addr *net.UDPAddr) {
 		var payload []byte
 		payload, err = s.symmCrypto.Decrypt(r.Body, cl.eKey)
 		if err != nil {
-			s.Errors <- fmt.Errorf("error while decrypting other type record: %w", err)
+			s.logger.Printf("error while decrypting other type record: %s", err)
 			return
 		}
 
 		var sessionID, body []byte
 		sessionID, body, err = parseSessionID(payload, len(cl.sessionID))
 		if err != nil {
-			s.Errors <- fmt.Errorf("error while parsing session id for ping: %w", err)
+			s.logger.Printf("error while parsing session id for ping: %s", err)
 			return
 		}
 
 		if !cl.ValidateSessionID(sessionID) {
-			s.Errors <- fmt.Errorf("error while validating client session for other type record: %w", ErrClientSessionNotFound)
+			s.logger.Printf("error while validating client session for other type record: %s", ErrClientSessionNotFound)
 			s.unAuthenticated(addr)
 			return
 		}
@@ -563,7 +567,7 @@ func (s *Server) BroadcastToClients(typ byte, payload []byte) {
 		go func() {
 			err := s.sendToClient(client, typ, payload)
 			if err != nil {
-				s.Errors <- err
+				s.logger.Printf("error while writing to the client: %s", err)
 			}
 		}()
 	}
@@ -573,7 +577,7 @@ func (s *Server) unAuthenticated(addr *net.UDPAddr) {
 	payload := composeRecordBytes(UnAuthenticated, s.protocolVersion, []byte{})
 	err := s.sendToAddr(addr, payload)
 	if err != nil {
-		s.Errors <- fmt.Errorf("error while sending UnAuthenticated record to the client: %w", err)
+		s.logger.Printf("error while sending UnAuthenticated record to the client: %s", err)
 		return
 	}
 }
@@ -674,5 +678,12 @@ func WithTranscoder(t encoding.Transcoder) Option {
 func WithAuthClient(ac AuthClient) Option {
 	return func(s *Server) {
 		s.authClient = ac
+	}
+}
+
+// WithLogger sets the logger
+func WithLogger(l *log.Logger) Option {
+	return func(s *Server) {
+		s.logger = l
 	}
 }
