@@ -91,9 +91,6 @@ type Config struct {
 	// an implementation of Asymmetric encryption to decrypt the body of the client handshake hello record
 	AsymmCrypto crypto.Asymmetric
 
-	// the Session manager generates cookie & session ID
-	sessionManager *sessionManager
-
 	// Buffer limit size for incoming bytes
 	ReadBufferSize int
 
@@ -131,6 +128,9 @@ type Server struct {
 
 	// Client garbage collector stop channel
 	garbageCollectionStop chan bool
+
+	// the Session manager generates cookie & session ID
+	sessionManager *sessionManager
 
 	// Map of client with index of IP_PORT
 	sessions map[string]*Client
@@ -179,11 +179,11 @@ func NewServer(conn *net.UDPConn, config *Config) (*Server, error) {
 		config.Transcoder = &pb.Protobuf{}
 	}
 
-	config.sessionManager, err = newSessionManager()
+	sm, err := newSessionManager()
 	if err != nil {
 		return nil, err
 	}
-
+	
 	return &Server{
 		conn:   conn,
 		config: config,
@@ -191,8 +191,11 @@ func NewServer(conn *net.UDPConn, config *Config) (*Server, error) {
 		clients:  make(map[string]*Client),
 		sessions: make(map[string]*Client),
 
+		sessionManager: sm,
+
 		garbageCollectionStop: make(chan bool, 1),
 		stop:                  make(chan bool, 1),
+
 
 		Errors: make(chan error),
 	}, nil
@@ -282,7 +285,7 @@ func (s *Server) handleRecord(record []byte, addr *net.UDPAddr) {
 		//TODO validate the client random
 
 		if len(handshake.GetCookie()) == 0 {
-			cookie := s.config.sessionManager.GetAddrCookieHMAC(addr, []byte(handshake.GetClientVersion()), handshake.GetSessionId(), handshake.GetRandom()) //TODO session id is empty
+			cookie := s.sessionManager.GetAddrCookieHMAC(addr, []byte(handshake.GetClientVersion()), handshake.GetSessionId(), handshake.GetRandom()) //TODO session id is empty
 
 			if len(handshake.GetKey()) < insecureSymmKeySize {
 				s.Errors <- fmt.Errorf("error while parsing ClientHello record: %w", ErrInsecureEncryptionKeySize)
@@ -314,7 +317,7 @@ func (s *Server) handleRecord(record []byte, addr *net.UDPAddr) {
 				return
 			}
 		} else {
-			cookie := s.config.sessionManager.GetAddrCookieHMAC(addr, []byte(handshake.GetClientVersion()), handshake.GetSessionId(), handshake.GetRandom()) //TODO session id is empty
+			cookie := s.sessionManager.GetAddrCookieHMAC(addr, []byte(handshake.GetClientVersion()), handshake.GetSessionId(), handshake.GetRandom()) //TODO session id is empty
 			if !crypto.HMACEqual(handshake.GetCookie(), cookie) {
 				s.Errors <- fmt.Errorf("error while validation HelloVerify record cookie: %w", ErrClientCookieIsInvalid)
 				return
@@ -472,7 +475,7 @@ func parseSessionID(p []byte, sLen int) ([]byte, []byte, error) {
 
 // registerClient generates a new session ID & registers an address with token ID & encryption key as a Client
 func (s *Server) registerClient(addr *net.UDPAddr, ID string, eKey []byte) (*Client, error) {
-	sessionID, err := s.config.sessionManager.GenerateSessionID(addr, ID)
+	sessionID, err := s.sessionManager.GenerateSessionID(addr, ID)
 	if err != nil {
 		return nil, err
 	}
