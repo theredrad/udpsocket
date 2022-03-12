@@ -105,8 +105,6 @@ type Config struct {
 
 	// Protocol minor version
 	ProtocolVersionMinor uint8
-
-	protocolVersion [2]byte
 }
 
 // The Server is a UDP listener that handles the handshake process, encryption, client authentication, sending records to the client & proxy custom record types to the handler method
@@ -140,6 +138,8 @@ type Server struct {
 
 	// Channel of server errors
 	Errors chan error
+
+	protocolVersion [2]byte
 }
 
 // NewServer accepts UDP connection & configs & returns a new instance of the Server
@@ -156,8 +156,6 @@ func NewServer(conn *net.UDPConn, config *Config) (*Server, error) {
 	if config.MinimumPayloadSize == 0 {
 		config.MinimumPayloadSize = defaultMinimumPayloadSize
 	}
-
-	config.protocolVersion = [2]byte{config.ProtocolVersionMajor, config.ProtocolVersionMinor}
 
 	if config.SymmCrypto == nil {
 		config.SymmCrypto = crypto.NewAES(crypto.AES_CBC)
@@ -183,7 +181,7 @@ func NewServer(conn *net.UDPConn, config *Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	return &Server{
 		conn:   conn,
 		config: config,
@@ -196,6 +194,7 @@ func NewServer(conn *net.UDPConn, config *Config) (*Server, error) {
 		garbageCollectionStop: make(chan bool, 1),
 		stop:                  make(chan bool, 1),
 
+		protocolVersion: [2]byte{config.ProtocolVersionMajor, config.ProtocolVersionMinor},
 
 		Errors: make(chan error),
 	}, nil
@@ -309,7 +308,7 @@ func (s *Server) handleRecord(record []byte, addr *net.UDPAddr) {
 				return
 			}
 
-			handshakePayload = composeRecordBytes(HandshakeHelloVerifyRecordType, s.config.protocolVersion, handshakePayload)
+			handshakePayload = composeRecordBytes(HandshakeHelloVerifyRecordType, s.protocolVersion, handshakePayload)
 
 			err = s.sendToAddr(addr, handshakePayload)
 			if err != nil {
@@ -536,7 +535,7 @@ func (s *Server) sendToClient(client *Client, typ byte, payload []byte) error {
 	if err != nil {
 		return err
 	}
-	payload = composeRecordBytes(typ, s.config.protocolVersion, payload)
+	payload = composeRecordBytes(typ, s.protocolVersion, payload)
 	return s.sendToAddr(client.addr, payload)
 }
 
@@ -583,7 +582,7 @@ func (s *Server) BroadcastToClients(typ byte, payload []byte) {
 }
 
 func (s *Server) unAuthenticated(addr *net.UDPAddr) {
-	payload := composeRecordBytes(UnAuthenticated, s.config.protocolVersion, []byte{})
+	payload := composeRecordBytes(UnAuthenticated, s.protocolVersion, []byte{})
 	err := s.sendToAddr(addr, payload)
 	if err != nil {
 		s.Errors <- fmt.Errorf("error while sending UnAuthenticated record to the client: %w", err)
