@@ -23,10 +23,18 @@ type udpRecord struct {
 }
 
 type clientConfig struct {
-	*Config
-	serverAddr  *net.UDPAddr
-	aesKey      []byte
-	asymmCrypto *crypto.RSAEncryptor
+	authClient           AuthClient
+	transcoder           encoding.Transcoder
+	symmCrypto           crypto.Symmetric
+	asymmCrypto          *crypto.RSAEncryptor
+	readBufferSize       int
+	minimumPayloadSize   int
+	heartbeatExpiration  time.Duration
+	protocolVersionMajor uint8
+	protocolVersionMinor uint8
+	serverAddr           *net.UDPAddr
+	aesKey               []byte
+	sessionManager       *sessionManager
 }
 
 type client struct {
@@ -34,10 +42,22 @@ type client struct {
 	config *clientConfig
 }
 
-func newClient(conn *net.UDPConn, config *clientConfig) *client {
+func newClient(t *testing.T, conn *net.UDPConn, pk *rsa.PrivateKey, sm *sessionManager) *client {
 	return &client{
-		conn:   conn,
-		config: config,
+		conn: conn,
+		config: &clientConfig{
+			serverAddr:           serverAddr,
+			aesKey:               aesKey,
+			asymmCrypto:          crypto.NewRSAEncryptorFromPK(&pk.PublicKey),
+			authClient:           authMock(t),
+			transcoder:           &pb.Protobuf{},
+			symmCrypto:           crypto.NewAES(crypto.AES_CBC),
+			readBufferSize:       2048,
+			minimumPayloadSize:   4,
+			protocolVersionMajor: 0,
+			protocolVersionMinor: 1,
+			sessionManager:       sm,
+		},
 	}
 }
 
@@ -101,7 +121,7 @@ func (c *client) waitForIncomingRecord(ctx context.Context, recordChan chan *udp
 	case rec := <-recordChan:
 		msg := rec.Body[:rec.N]
 		msgBody := msg[3:]
-		d, err := c.config.SymmCrypto.Decrypt(msgBody, c.config.aesKey)
+		d, err := c.config.symmCrypto.Decrypt(msgBody, c.config.aesKey)
 		if err != nil {
 			return msg[0], nil, err
 		}
@@ -110,7 +130,7 @@ func (c *client) waitForIncomingRecord(ctx context.Context, recordChan chan *udp
 }
 
 func (c *client) composeHandshakeRecord(h encoding.HandshakeRecord, extra []byte) ([]byte, error) {
-	p, err := c.config.Transcoder.MarshalHandshake(h)
+	p, err := c.config.transcoder.MarshalHandshake(h)
 	if err != nil {
 		return nil, err
 	}
@@ -125,9 +145,9 @@ func (c *client) composeHandshakeRecord(h encoding.HandshakeRecord, extra []byte
 	l = len(p) / 256
 	s2 := byte(l % 256)
 
-	p = append([]byte{HandshakeClientHelloRecordType, c.config.ProtocolVersionMinor, c.config.ProtocolVersionMajor, s2, s1}, p...)
+	p = append([]byte{HandshakeClientHelloRecordType, c.config.protocolVersionMinor, c.config.protocolVersionMajor, s2, s1}, p...)
 	if len(extra) > 0 {
-		extra, err = c.config.SymmCrypto.Encrypt(extra, c.config.aesKey)
+		extra, err = c.config.symmCrypto.Encrypt(extra, c.config.aesKey)
 		if err != nil {
 			return nil, err
 		}
@@ -139,12 +159,12 @@ func (c *client) composeHandshakeRecord(h encoding.HandshakeRecord, extra []byte
 func (c *client) composeRecord(typ byte, sessionID, payload []byte) ([]byte, error) {
 	p := append(sessionID, payload...)
 
-	p, err := c.config.SymmCrypto.Encrypt(p, c.config.aesKey)
+	p, err := c.config.symmCrypto.Encrypt(p, c.config.aesKey)
 	if err != nil {
 		return nil, err
 	}
 
-	p = append([]byte{typ, c.config.ProtocolVersionMinor, c.config.ProtocolVersionMajor}, p...)
+	p = append([]byte{typ, c.config.protocolVersionMinor, c.config.protocolVersionMajor}, p...)
 	return p, nil
 }
 
@@ -175,25 +195,15 @@ func listenUDP(t *testing.T, addr *net.UDPAddr) (*net.UDPConn, func()) {
 	}
 }
 
-func newServerConfig(t *testing.T, pk *rsa.PrivateKey) *Config {
-	return &Config{
-		AuthClient:           authMock(t),
-		Transcoder:           &pb.Protobuf{},
-		SymmCrypto:           crypto.NewAES(crypto.AES_CBC),
-		AsymmCrypto:          crypto.NewRSAFromPK(pk),
-		ReadBufferSize:       2048,
-		MinimumPayloadSize:   4,
-		ProtocolVersionMajor: 0,
-		ProtocolVersionMinor: 1,
-	}
-}
-
-func newClientConfig(cfg *Config, pk *rsa.PrivateKey) *clientConfig {
-	return &clientConfig{
-		Config:      cfg,
-		serverAddr:  serverAddr,
-		aesKey:      aesKey,
-		asymmCrypto: crypto.NewRSAEncryptorFromPK(&pk.PublicKey),
+func newServerConfig(t *testing.T, pk *rsa.PrivateKey) []Option {
+	return []Option{
+		WithAuthClient(authMock(t)),
+		WithTranscoder(&pb.Protobuf{}),
+		WithSymmetricCrypto(crypto.NewAES(crypto.AES_CBC)),
+		WithAsymmetricCrypto(crypto.NewRSAFromPK(pk)),
+		WithReadBufferSize(2048),
+		WithMinimumPayloadSize(4),
+		WithProtocolVersion(1, 0),
 	}
 }
 
@@ -213,7 +223,7 @@ func TestServer_Handshake(t *testing.T) {
 	pk := newRSAKey(t)
 
 	cfg := newServerConfig(t, pk)
-	server, err := NewServer(serverConn, cfg)
+	server, err := NewServer(serverConn, cfg...)
 	if err != nil {
 		t.Errorf("expected new server, got err: %s", err)
 		t.FailNow()
@@ -223,7 +233,7 @@ func TestServer_Handshake(t *testing.T) {
 	clientConn, clientClose := listenUDP(t, clientAddr)
 	defer clientClose()
 
-	cl := newClient(clientConn, newClientConfig(cfg, pk))
+	cl := newClient(t, clientConn, pk, server.sessionManager)
 
 	tests := []struct {
 		name         string
@@ -351,7 +361,7 @@ func TestServer_Handshake(t *testing.T) {
 				}
 
 				var h pb.Handshake
-				err = cl.config.Transcoder.Unmarshal(m, &h)
+				err = cl.config.transcoder.Unmarshal(m, &h)
 				if err != nil {
 					t.Logf("expected unmarshaled messsage, got error: %d", err)
 					t.FailNow()
@@ -374,13 +384,11 @@ func TestServer_Timeout(t *testing.T) {
 	pk := newRSAKey(t)
 
 	cfg := newServerConfig(t, pk)
-	cfg.HeartbeatExpiration = 1 * time.Second
-	server, err := NewServer(serverConn, cfg)
+	server, err := NewServer(serverConn, append(cfg, WithHeartbeatExpiration(1*time.Second))...)
 	if err != nil {
 		t.Errorf("expected new server, got err: %s", err)
 		t.FailNow()
 	}
-	//go handleServerError(t, server.Errors)
 	go server.Serve()
 
 	callbackChan := make(chan byte, 1)
@@ -392,7 +400,7 @@ func TestServer_Timeout(t *testing.T) {
 	clientConn, clientClose := listenUDP(t, clientAddr)
 	defer clientClose()
 
-	cl := newClient(clientConn, newClientConfig(cfg, pk))
+	cl := newClient(t, clientConn, pk, server.sessionManager)
 
 	tests := []struct {
 		name    string
@@ -454,7 +462,7 @@ func TestServer_Timeout(t *testing.T) {
 				}
 
 				var h pb.Handshake
-				err = cl.config.Transcoder.Unmarshal(m, &h)
+				err = cl.config.transcoder.Unmarshal(m, &h)
 				if err != nil {
 					t.Logf("expected unmarshaled messsage, got error: %d", err)
 					t.FailNow()
@@ -486,8 +494,7 @@ func TestServer_Stop(t *testing.T) {
 	pk := newRSAKey(t)
 
 	cfg := newServerConfig(t, pk)
-	cfg.HeartbeatExpiration = 1 * time.Second
-	server, err := NewServer(serverConn, cfg)
+	server, err := NewServer(serverConn, append(cfg, WithHeartbeatExpiration(1*time.Second))...)
 	if err != nil {
 		t.Errorf("expected new server, got err: %s", err)
 		t.FailNow()
@@ -538,7 +545,7 @@ func TestServer_Stop(t *testing.T) {
 	clientConn, clientClose := listenUDP(t, clientAddr)
 	defer clientClose()
 
-	cl := newClient(clientConn, newClientConfig(cfg, pk))
+	cl := newClient(t, clientConn, pk, server.sessionManager)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

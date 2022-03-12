@@ -19,6 +19,8 @@ import (
 // HandlerFunc is called when a custom message type is received from the client
 type HandlerFunc func(id string, t byte, p []byte)
 
+type Option func(*Server)
+
 // custom error types
 var (
 	ErrInvalidRecordType            = errors.New("invalid record type")
@@ -40,7 +42,7 @@ const (
 	PongRecordType
 	UnAuthenticated
 
-	// default RSA key size, this config is used to initiate new RSA implementation if no asymmetric encryption is passed
+	// default RSA key size, this options is used to initiate new RSA implementation if no asymmetric encryption is passed
 	defaultRSAKeySize         int = 2048
 	defaultMinimumPayloadSize int = 3
 	defaultReadBufferSize     int = 2048
@@ -77,43 +79,31 @@ type Client struct {
 	sync.Mutex
 }
 
-// Server config
-type Config struct {
-	// an implementation of the AuthClient to authenticate the user token, if not set, no authentication will apply
-	AuthClient AuthClient
-
-	// an implementation of the Transcoder to encode & decode the record body, if not set, an implementation of the Protobuf will use
-	Transcoder encoding.Transcoder
-
-	// an implementation of Symmetric encryption to encrypt & decrypt records body for the client after a successful handshake
-	SymmCrypto crypto.Symmetric
-
-	// an implementation of Asymmetric encryption to decrypt the body of the client handshake hello record
-	AsymmCrypto crypto.Asymmetric
-
-	// Buffer limit size for incoming bytes
-	ReadBufferSize int
-
-	// Minimum payload size to ignore too short incoming bytes
-	MinimumPayloadSize int
-
-	// Expiration time of last heartbeat to delete client
-	HeartbeatExpiration time.Duration
-
-	// Protocol major version
-	ProtocolVersionMajor uint8
-
-	// Protocol minor version
-	ProtocolVersionMinor uint8
-}
-
 // The Server is a UDP listener that handles the handshake process, encryption, client authentication, sending records to the client & proxy custom record types to the handler method
 type Server struct {
 	// UDP connection to listen
 	conn *net.UDPConn
 
-	// Server config which contains AuthClient, Transcoder, Cryptography ...
-	config *Config
+	// an implementation of the AuthClient to authenticate the user token, if not set, no authentication will apply
+	authClient AuthClient
+
+	// an implementation of the Transcoder to encode & decode the record body, if not set, an implementation of the Protobuf will use
+	transcoder encoding.Transcoder
+
+	// an implementation of Asymmetric encryption to decrypt the body of the client handshake hello record
+	asymmCrypto crypto.Asymmetric
+
+	// an implementation of Symmetric encryption to encrypt & decrypt records body for the client after a successful handshake
+	symmCrypto crypto.Symmetric
+
+	// Buffer limit size for incoming bytes
+	readBufferSize int
+
+	// Minimum payload size to ignore too short incoming bytes
+	minimumPayloadSize int
+
+	// Expiration time of last heartbeat to delete client
+	heartbeatExpiration time.Duration
 
 	// Handler func which is called when a custom record type received
 	handler HandlerFunc
@@ -139,65 +129,63 @@ type Server struct {
 	// Channel of server errors
 	Errors chan error
 
+	// Protocol version
 	protocolVersion [2]byte
 }
 
 // NewServer accepts UDP connection & configs & returns a new instance of the Server
-// If config is nil or any required config isn't passed, a default instance of it will be set, e.g. Protobuf implementation if no Transcoder is set
-func NewServer(conn *net.UDPConn, config *Config) (*Server, error) {
-	if config == nil {
-		config = &Config{}
+// If options is nil or any required options isn't passed, a default instance of it will be set, e.g. Protobuf implementation if no Transcoder is set
+func NewServer(conn *net.UDPConn, options ...Option) (*Server, error) {
+	s := Server{
+		conn: conn,
+
+		clients:  make(map[string]*Client),
+		sessions: make(map[string]*Client),
+
+		garbageCollectionStop: make(chan bool, 1),
+		stop:                  make(chan bool, 1),
+
+		Errors: make(chan error),
 	}
 
-	if config.ReadBufferSize == 0 {
-		config.ReadBufferSize = defaultReadBufferSize
+	for _, opt := range options {
+		opt(&s)
 	}
 
-	if config.MinimumPayloadSize == 0 {
-		config.MinimumPayloadSize = defaultMinimumPayloadSize
+	if s.readBufferSize == 0 {
+		s.readBufferSize = defaultReadBufferSize
 	}
 
-	if config.SymmCrypto == nil {
-		config.SymmCrypto = crypto.NewAES(crypto.AES_CBC)
+	if s.minimumPayloadSize == 0 {
+		s.minimumPayloadSize = defaultMinimumPayloadSize
+	}
+
+	if s.symmCrypto == nil {
+		s.symmCrypto = crypto.NewAES(crypto.AES_CBC)
 	}
 
 	var err error
-	if config.AsymmCrypto == nil {
-		config.AsymmCrypto, err = crypto.NewRSA(defaultRSAKeySize)
+	if s.asymmCrypto == nil {
+		s.asymmCrypto, err = crypto.NewRSA(defaultRSAKeySize)
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	if config.AuthClient == nil {
-		config.AuthClient = &DefaultAuthClient{}
+	if s.authClient == nil {
+		s.authClient = &DefaultAuthClient{}
 	}
 
-	if config.Transcoder == nil {
-		config.Transcoder = &pb.Protobuf{}
+	if s.transcoder == nil {
+		s.transcoder = &pb.Protobuf{}
 	}
 
-	sm, err := newSessionManager()
+	s.sessionManager, err = newSessionManager()
 	if err != nil {
 		return nil, err
 	}
 
-	return &Server{
-		conn:   conn,
-		config: config,
-
-		clients:  make(map[string]*Client),
-		sessions: make(map[string]*Client),
-
-		sessionManager: sm,
-
-		garbageCollectionStop: make(chan bool, 1),
-		stop:                  make(chan bool, 1),
-
-		protocolVersion: [2]byte{config.ProtocolVersionMajor, config.ProtocolVersionMinor},
-
-		Errors: make(chan error),
-	}, nil
+	return &s, nil
 }
 
 // Set handler function as a callback to call when a custom record type is received from the client
@@ -207,11 +195,11 @@ func (s *Server) SetHandler(f HandlerFunc) {
 
 // Start listening to the UDP port for incoming bytes & then pass it to the handleRecord method if no error is found
 func (s *Server) Serve() {
-	if s.config.HeartbeatExpiration > 0 {
+	if s.heartbeatExpiration > 0 {
 		if s.garbageCollectionTicker != nil {
 			s.garbageCollectionTicker.Stop()
 		}
-		s.garbageCollectionTicker = time.NewTicker(s.config.HeartbeatExpiration)
+		s.garbageCollectionTicker = time.NewTicker(s.heartbeatExpiration)
 		s.garbageCollectionStop = make(chan bool, 1)
 		go s.clientGarbageCollection()
 	}
@@ -223,7 +211,7 @@ func (s *Server) Serve() {
 		case _ = <-s.stop:
 			return
 		default:
-			buf := make([]byte, s.config.ReadBufferSize)
+			buf := make([]byte, s.readBufferSize)
 			n, addr, err := s.conn.ReadFromUDP(buf)
 			if err != nil {
 				if errors.Is(err, net.ErrClosed) {
@@ -254,7 +242,7 @@ func (s *Server) Stop() {
 // all custom record types will validate & authenticate, then pass to the handler method with the client ID
 // if a ping record is received, the server sends a pong record immediately
 func (s *Server) handleRecord(record []byte, addr *net.UDPAddr) {
-	if len(record) < s.config.MinimumPayloadSize {
+	if len(record) < s.minimumPayloadSize {
 		s.Errors <- ErrMinimumPayloadSizeLimit
 		return
 	}
@@ -268,14 +256,14 @@ func (s *Server) handleRecord(record []byte, addr *net.UDPAddr) {
 	switch r.Type {
 	case HandshakeClientHelloRecordType:
 		var payload []byte
-		payload, err = s.config.AsymmCrypto.Decrypt(r.Body)
+		payload, err = s.asymmCrypto.Decrypt(r.Body)
 		if err != nil {
 			s.Errors <- err
 			return
 		}
 
 		var handshake encoding.HandshakeRecord
-		handshake, err = s.config.Transcoder.UnmarshalHandshake(payload)
+		handshake, err = s.transcoder.UnmarshalHandshake(payload)
 		if err != nil {
 			s.Errors <- fmt.Errorf("error while unmarshaling ClientHello record: %w", err)
 			return
@@ -291,18 +279,18 @@ func (s *Server) handleRecord(record []byte, addr *net.UDPAddr) {
 				return
 			}
 
-			serverHandshakeVerify := s.config.Transcoder.NewHandshakeRecord()
+			serverHandshakeVerify := s.transcoder.NewHandshakeRecord()
 			serverHandshakeVerify.SetCookie(cookie)
 			serverHandshakeVerify.SetTimestamp(time.Now().UnixNano() / int64(time.Millisecond))
 
 			var handshakePayload []byte
-			handshakePayload, err = s.config.Transcoder.MarshalHandshake(serverHandshakeVerify)
+			handshakePayload, err = s.transcoder.MarshalHandshake(serverHandshakeVerify)
 			if err != nil {
 				s.Errors <- fmt.Errorf("error while creating HelloVerify record: %w", err)
 				return
 			}
 
-			handshakePayload, err = s.config.SymmCrypto.Encrypt(handshakePayload, handshake.GetKey())
+			handshakePayload, err = s.symmCrypto.Encrypt(handshakePayload, handshake.GetKey())
 			if err != nil {
 				s.Errors <- fmt.Errorf("error while encrypting HelloVerify record: %w", err)
 				return
@@ -329,7 +317,7 @@ func (s *Server) handleRecord(record []byte, addr *net.UDPAddr) {
 
 			var token []byte
 			if len(r.Extra) > 0 {
-				token, err = s.config.SymmCrypto.Decrypt(r.Extra, handshake.GetKey())
+				token, err = s.symmCrypto.Decrypt(r.Extra, handshake.GetKey())
 				if err != nil {
 					s.Errors <- fmt.Errorf("error while decrypting HelloVerify record token: %w", err)
 					return
@@ -337,7 +325,7 @@ func (s *Server) handleRecord(record []byte, addr *net.UDPAddr) {
 			}
 
 			var ID string
-			ID, err = s.config.AuthClient.Authenticate(context.Background(), token)
+			ID, err = s.authClient.Authenticate(context.Background(), token)
 			if err != nil {
 				s.Errors <- fmt.Errorf("error while authenticating client token: %w", err)
 				return
@@ -350,12 +338,12 @@ func (s *Server) handleRecord(record []byte, addr *net.UDPAddr) {
 				return
 			}
 
-			serverHandshakeHello := s.config.Transcoder.NewHandshakeRecord()
+			serverHandshakeHello := s.transcoder.NewHandshakeRecord()
 			serverHandshakeHello.SetSessionId(cl.sessionID)
 			serverHandshakeHello.SetTimestamp(time.Now().UnixNano() / int64(time.Millisecond))
 
 			var handshakePayload []byte
-			handshakePayload, err = s.config.Transcoder.MarshalHandshake(serverHandshakeHello)
+			handshakePayload, err = s.transcoder.MarshalHandshake(serverHandshakeHello)
 			if err != nil {
 				s.Errors <- fmt.Errorf("error while marshaling server hello record: %w", err)
 				return
@@ -374,11 +362,11 @@ func (s *Server) handleRecord(record []byte, addr *net.UDPAddr) {
 			return
 		}
 
-		pong := s.config.Transcoder.NewPongRecord()
+		pong := s.transcoder.NewPongRecord()
 		pong.SetReceivedAt(time.Now().UnixNano())
 
 		var payload []byte
-		payload, err = s.config.SymmCrypto.Decrypt(r.Body, cl.eKey)
+		payload, err = s.symmCrypto.Decrypt(r.Body, cl.eKey)
 		if err != nil {
 			s.Errors <- fmt.Errorf("error while decrypting ping record: %w", err)
 			return
@@ -398,7 +386,7 @@ func (s *Server) handleRecord(record []byte, addr *net.UDPAddr) {
 		}
 
 		var ping encoding.PingRecord
-		ping, err = s.config.Transcoder.UnmarshalPing(body)
+		ping, err = s.transcoder.UnmarshalPing(body)
 		if err != nil {
 			s.Errors <- fmt.Errorf("error while unmarshaling ping record: %w", err)
 			return
@@ -408,7 +396,7 @@ func (s *Server) handleRecord(record []byte, addr *net.UDPAddr) {
 		pong.SetSentAt(time.Now().UnixNano())
 
 		var pongPayload []byte
-		pongPayload, err = s.config.Transcoder.MarshalPong(pong)
+		pongPayload, err = s.transcoder.MarshalPong(pong)
 		if err != nil {
 			s.Errors <- fmt.Errorf("error while marshaling pong record: %w", err)
 			return
@@ -434,7 +422,7 @@ func (s *Server) handleRecord(record []byte, addr *net.UDPAddr) {
 		}
 
 		var payload []byte
-		payload, err = s.config.SymmCrypto.Decrypt(r.Body, cl.eKey)
+		payload, err = s.symmCrypto.Decrypt(r.Body, cl.eKey)
 		if err != nil {
 			s.Errors <- fmt.Errorf("error while decrypting other type record: %w", err)
 			return
@@ -531,7 +519,7 @@ func (s *Server) sendToAddr(addr *net.UDPAddr, record []byte) error {
 
 // sends a record byte array to the Client. the record type is prepended to the record body as a byte
 func (s *Server) sendToClient(client *Client, typ byte, payload []byte) error {
-	payload, err := s.config.SymmCrypto.Encrypt(payload, client.eKey)
+	payload, err := s.symmCrypto.Encrypt(payload, client.eKey)
 	if err != nil {
 		return err
 	}
@@ -559,7 +547,7 @@ func (s *Server) clientGarbageCollection() {
 			break
 		case <-s.garbageCollectionTicker.C:
 			for _, c := range s.clients {
-				if c.lastHeartbeat != nil && time.Now().After(c.lastHeartbeat.Add(s.config.HeartbeatExpiration)) {
+				if c.lastHeartbeat != nil && time.Now().After(c.lastHeartbeat.Add(s.heartbeatExpiration)) {
 					delete(s.clients, c.ID)
 					delete(s.sessions, fmt.Sprintf("%s_%d", c.addr.IP.String(), c.addr.Port))
 				}
@@ -631,4 +619,60 @@ func (c *Client) ValidateSessionID(sessionID []byte) bool {
 		return true
 	}
 	return false
+}
+
+// WithProtocolVersion sets the server protocol version
+func WithProtocolVersion(major, minor uint8) Option {
+	return func(s *Server) {
+		s.protocolVersion = [2]byte{major, minor}
+	}
+}
+
+// WithHeartbeatExpiration sets the server heartbeat expiration option
+func WithHeartbeatExpiration(t time.Duration) Option {
+	return func(s *Server) {
+		s.heartbeatExpiration = t
+	}
+}
+
+// WithMinimumPayloadSize sets the minimum payload size option
+func WithMinimumPayloadSize(i int) Option {
+	return func(s *Server) {
+		s.minimumPayloadSize = i
+	}
+}
+
+// WithReadBufferSize sets the read buffer size option
+func WithReadBufferSize(i int) Option {
+	return func(s *Server) {
+		s.readBufferSize = i
+	}
+}
+
+// WithSymmetricCrypto sets the symmetric cryptography implementation
+func WithSymmetricCrypto(sc crypto.Symmetric) Option {
+	return func(s *Server) {
+		s.symmCrypto = sc
+	}
+}
+
+// WithAsymmetricCrypto sets the asymmetric cryptography implementation
+func WithAsymmetricCrypto(ac crypto.Asymmetric) Option {
+	return func(s *Server) {
+		s.asymmCrypto = ac
+	}
+}
+
+// WithTranscoder sets the transcoder implementation
+func WithTranscoder(t encoding.Transcoder) Option {
+	return func(s *Server) {
+		s.transcoder = t
+	}
+}
+
+// WithAuthClient sets the auth client implementation
+func WithAuthClient(ac AuthClient) Option {
+	return func(s *Server) {
+		s.authClient = ac
+	}
 }
