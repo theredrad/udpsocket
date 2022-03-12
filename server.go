@@ -133,6 +133,8 @@ type Server struct {
 
 	// Logger
 	logger *log.Logger
+
+	wg *sync.WaitGroup
 }
 
 // NewServer accepts UDP connection & configs & returns a new instance of the Server
@@ -146,6 +148,8 @@ func NewServer(conn *net.UDPConn, options ...Option) (*Server, error) {
 
 		garbageCollectionStop: make(chan bool, 1),
 		stop:                  make(chan bool, 1),
+
+		wg: &sync.WaitGroup{},
 	}
 
 	for _, opt := range options {
@@ -234,6 +238,7 @@ func (s *Server) Stop() {
 	s.conn.SetReadDeadline(time.Unix(0, 1)) // set read deadline to a longtime ago @TODO: handle error
 	s.stop <- true
 	s.garbageCollectionStop <- true
+	s.wg.Wait()
 }
 
 // handlerRecord validate & parse incoming bytes to a record instance, then process it depends on the record type
@@ -563,7 +568,9 @@ func (s *Server) clientGarbageCollection() {
 // a method to broadcast byte array to all registered Clients
 func (s *Server) BroadcastToClients(typ byte, payload []byte) {
 	for _, cl := range s.clients {
+		s.wg.Add(1)
 		go func(c *Client) {
+			defer s.wg.Done()
 			err := s.sendToClient(c, typ, payload)
 			if err != nil {
 				s.logger.Printf("error while writing to the client: %s", err)

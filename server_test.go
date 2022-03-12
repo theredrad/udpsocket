@@ -6,6 +6,7 @@ import (
 	"crypto/rsa"
 	"errors"
 	"github.com/golang/mock/gomock"
+	"github.com/google/uuid"
 	"github.com/theredrad/udpsocket/crypto"
 	"github.com/theredrad/udpsocket/encoding"
 	"github.com/theredrad/udpsocket/encoding/pb"
@@ -576,6 +577,53 @@ func TestServer_Stop(t *testing.T) {
 				tt.postFunc()
 			}
 		})
+	}
+}
+
+func TestServer_BroadcastToClients(t *testing.T) {
+	serverConn, serverClose := listenUDP(t, serverAddr)
+	defer serverClose()
+
+	pk := newRSAKey(t)
+
+	cfg := newServerConfig(t, pk)
+	server, err := NewServer(serverConn, append(cfg, WithHeartbeatExpiration(1*time.Second))...)
+	if err != nil {
+		t.Errorf("expected new server, got err: %s", err)
+		t.FailNow()
+	}
+	go server.Serve()
+
+	clientConn, clientClose := listenUDP(t, clientAddr)
+	defer clientClose()
+
+	cl := newClient(t, clientConn, pk, server.sessionManager)
+
+	_, err = server.registerClient(clientAddr, uuid.New().String(), aesKey)
+	if err != nil {
+		t.Errorf("expected new client, got err: %s", err)
+		t.FailNow()
+	}
+
+	recChan := make(chan *udpRecord, 1)
+	go cl.read(recChan, 500*time.Millisecond)
+
+	var msgType byte = 16
+	body := []byte{1, 5, 9}
+	server.BroadcastToClients(msgType, body)
+	server.Stop()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	typ, b, err := cl.waitForIncomingRecord(ctx, recChan)
+	if err != nil {
+		t.Logf("expected broadcast message, got: %v", err)
+		t.FailNow()
+	}
+
+	if typ != msgType || !bytes.Equal(body, b) {
+		t.Logf("expected broadcast message, got unexpected messsage")
+		t.FailNow()
 	}
 }
 
