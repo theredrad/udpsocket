@@ -62,6 +62,11 @@ type record struct {
 	Extra      []byte
 }
 
+type rawRecord struct {
+	payload []byte
+	addr    *net.UDPAddr
+}
+
 // client is an authenticated UDP client
 type Client struct {
 	ID string
@@ -131,6 +136,8 @@ type Server struct {
 	// Protocol version
 	protocolVersion [2]byte
 
+	rawRecords chan rawRecord
+
 	// Logger
 	logger *log.Logger
 
@@ -150,6 +157,8 @@ func NewServer(conn *net.UDPConn, options ...Option) (*Server, error) {
 		stop:                  make(chan bool, 1),
 
 		wg: &sync.WaitGroup{},
+
+		rawRecords: make(chan rawRecord),
 	}
 
 	for _, opt := range options {
@@ -201,6 +210,15 @@ func (s *Server) SetHandler(f HandlerFunc) {
 	s.handler = f
 }
 
+func (s *Server) handleRawRecords() {
+	for {
+		select {
+		case r := <-s.rawRecords:
+			s.handleRecord(r.payload, r.addr)
+		}
+	}
+}
+
 // Start listening to the UDP port for incoming bytes & then pass it to the handleRecord method if no error is found
 func (s *Server) Serve() {
 	if s.heartbeatExpiration > 0 {
@@ -211,6 +229,8 @@ func (s *Server) Serve() {
 		s.garbageCollectionStop = make(chan bool, 1)
 		go s.clientGarbageCollection()
 	}
+
+	go s.handleRawRecords()
 
 	s.conn.SetReadDeadline(time.Time{}) // reset read deadline @TODO: handle error
 	s.stop = make(chan bool, 1)         // reset the stop channel
@@ -229,7 +249,11 @@ func (s *Server) Serve() {
 				s.logger.Printf("error while reading from udp: %s", err)
 				continue
 			}
-			go s.handleRecord(buf[0:n], addr)
+			s.rawRecords <- rawRecord{
+				payload: buf[0:n],
+				addr:    addr,
+			}
+			//go s.handleRecord(buf[0:n], addr)
 		}
 	}
 }
