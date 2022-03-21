@@ -264,201 +264,215 @@ func (s *Server) handleRecord(record []byte, addr *net.UDPAddr) {
 
 	switch r.Type {
 	case HandshakeClientHelloRecordType:
-		var payload []byte
-		payload, err = s.asymmCrypto.Decrypt(r.Body)
-		if err != nil {
-			s.logger.Printf("error while decrypting record body: %s", err)
-			return
-		}
-
-		var handshake encoding.HandshakeRecord
-		handshake, err = s.transcoder.UnmarshalHandshake(payload)
-		if err != nil {
-			s.logger.Printf("error while unmarshaling ClientHello record: %s", err)
-			return
-		}
-
-		//TODO validate the client random
-
-		if len(handshake.GetCookie()) == 0 {
-			cookie := s.sessionManager.GetAddrCookieHMAC(addr, []byte(handshake.GetClientVersion()), handshake.GetSessionId(), handshake.GetRandom()) //TODO session id is empty
-
-			if len(handshake.GetKey()) < insecureSymmKeySize {
-				s.logger.Printf("error while parsing ClientHello record: %s", ErrInsecureEncryptionKeySize)
-				return
-			}
-
-			serverHandshakeVerify := s.transcoder.NewHandshakeRecord()
-			serverHandshakeVerify.SetCookie(cookie)
-			serverHandshakeVerify.SetTimestamp(time.Now().UnixNano() / int64(time.Millisecond))
-
-			var handshakePayload []byte
-			handshakePayload, err = s.transcoder.MarshalHandshake(serverHandshakeVerify)
-			if err != nil {
-				s.logger.Printf("error while creating HelloVerify record: %s", err)
-				return
-			}
-
-			handshakePayload, err = s.symmCrypto.Encrypt(handshakePayload, handshake.GetKey())
-			if err != nil {
-				s.logger.Printf("error while encrypting HelloVerify record: %s", err)
-				return
-			}
-
-			handshakePayload = composeRecordBytes(HandshakeHelloVerifyRecordType, s.protocolVersion, handshakePayload)
-
-			err = s.sendToAddr(addr, handshakePayload)
-			if err != nil {
-				s.logger.Printf("error while sending HelloVerify record to the client: %s", err)
-				return
-			}
-		} else {
-			cookie := s.sessionManager.GetAddrCookieHMAC(addr, []byte(handshake.GetClientVersion()), handshake.GetSessionId(), handshake.GetRandom()) //TODO session id is empty
-			if !crypto.HMACEqual(handshake.GetCookie(), cookie) {
-				s.logger.Printf("error while validation HelloVerify record cookie: %s", ErrClientCookieIsInvalid)
-				return
-			}
-
-			if len(handshake.GetKey()) < insecureSymmKeySize {
-				s.logger.Printf("error while validating HelloVerify record key: %s", ErrInsecureEncryptionKeySize)
-				return
-			}
-
-			var token []byte
-			if len(r.Extra) > 0 {
-				token, err = s.symmCrypto.Decrypt(r.Extra, handshake.GetKey())
-				if err != nil {
-					s.logger.Printf("error while decrypting HelloVerify record token: %s", err)
-					return
-				}
-			}
-
-			var ID string
-			ID, err = s.authClient.Authenticate(context.Background(), token)
-			if err != nil {
-				s.logger.Printf("error while authenticating client token: %s", err)
-				return
-			}
-
-			var cl *Client
-			cl, err = s.registerClient(addr, ID, handshake.GetKey())
-			if err != nil {
-				s.logger.Printf("error while registering client: %s", err)
-				return
-			}
-
-			serverHandshakeHello := s.transcoder.NewHandshakeRecord()
-			serverHandshakeHello.SetSessionId(cl.sessionID)
-			serverHandshakeHello.SetTimestamp(time.Now().UnixNano() / int64(time.Millisecond))
-
-			var handshakePayload []byte
-			handshakePayload, err = s.transcoder.MarshalHandshake(serverHandshakeHello)
-			if err != nil {
-				s.logger.Printf("error while marshaling server hello record: %s", err)
-				return
-			}
-
-			err = s.sendToClient(cl, HandshakeServerHelloRecordType, handshakePayload)
-			if err != nil {
-				s.logger.Printf("error while sending server hello record: %s", err)
-				return
-			}
-		}
+		s.handleHandshakeRecord(context.Background(), addr, r)
 	case PingRecordType:
-		cl, ok := s.findClientByAddr(addr)
-		if !ok {
-			s.logger.Printf("error while authenticating ping record: %s", ErrClientAddressIsNotRegistered)
-			return
-		}
-
-		pong := s.transcoder.NewPongRecord()
-		pong.SetReceivedAt(time.Now().UnixNano())
-
-		var payload []byte
-		payload, err = s.symmCrypto.Decrypt(r.Body, cl.eKey)
-		if err != nil {
-			s.logger.Printf("error while decrypting ping record: %s", err)
-			return
-		}
-
-		var sessionID, body []byte
-		sessionID, body, err = parseSessionID(payload, len(cl.sessionID))
-		if err != nil {
-			s.logger.Printf("error while parsing session id for ping: %s", err)
-			return
-		}
-
-		if !cl.ValidateSessionID(sessionID) {
-			s.logger.Printf("error while validating session id for ping: %s", ErrClientSessionNotFound)
-			s.unAuthenticated(addr)
-			return
-		}
-
-		var ping encoding.PingRecord
-		ping, err = s.transcoder.UnmarshalPing(body)
-		if err != nil {
-			s.logger.Printf("error while unmarshaling ping record: %s", err)
-			return
-		}
-
-		pong.SetPingSentAt(ping.GetSentAt())
-		pong.SetSentAt(time.Now().UnixNano())
-
-		var pongPayload []byte
-		pongPayload, err = s.transcoder.MarshalPong(pong)
-		if err != nil {
-			s.logger.Printf("error while marshaling pong record: %s", err)
-			return
-		}
-
-		err = s.sendToClient(cl, PongRecordType, pongPayload)
-		if err != nil {
-			s.logger.Printf("error while sending pong record: %s", err)
-			return
-		}
-
-		now := time.Now()
-		cl.Lock()
-		cl.lastHeartbeat = &now
-		cl.Unlock()
-
+		s.handlePingRecord(context.Background(), addr, r)
 	default:
-		cl, ok := s.findClientByAddr(addr)
-		if !ok {
-			s.logger.Printf("error while authenticating other type record: %s", ErrClientAddressIsNotRegistered)
-			s.unAuthenticated(addr)
-			return
-		}
-
-		var payload []byte
-		payload, err = s.symmCrypto.Decrypt(r.Body, cl.eKey)
-		if err != nil {
-			s.logger.Printf("error while decrypting other type record: %s", err)
-			return
-		}
-
-		var sessionID, body []byte
-		sessionID, body, err = parseSessionID(payload, len(cl.sessionID))
-		if err != nil {
-			s.logger.Printf("error while parsing session id for ping: %s", err)
-			return
-		}
-
-		if !cl.ValidateSessionID(sessionID) {
-			s.logger.Printf("error while validating client session for other type record: %s", ErrClientSessionNotFound)
-			s.unAuthenticated(addr)
-			return
-		}
-
-		if s.handler != nil {
-			s.handler(cl.ID, r.Type, body)
-		}
-
-		now := time.Now()
-		cl.Lock()
-		cl.lastHeartbeat = &now
-		cl.Unlock()
+		s.handleCustomRecord(context.Background(), addr, r)
 	}
+}
+
+// handleHandshakeRecord handles handshake process
+func (s *Server) handleHandshakeRecord(ctx context.Context, addr *net.UDPAddr, r *record) {
+	var payload []byte
+	payload, err := s.asymmCrypto.Decrypt(r.Body)
+	if err != nil {
+		s.logger.Printf("error while decrypting record body: %s", err)
+		return
+	}
+
+	var handshake encoding.HandshakeRecord
+	handshake, err = s.transcoder.UnmarshalHandshake(payload)
+	if err != nil {
+		s.logger.Printf("error while unmarshaling ClientHello record: %s", err)
+		return
+	}
+
+	//TODO validate the client random
+
+	if len(handshake.GetCookie()) == 0 {
+		cookie := s.sessionManager.GetAddrCookieHMAC(addr, []byte(handshake.GetClientVersion()), handshake.GetSessionId(), handshake.GetRandom()) //TODO session id is empty
+
+		if len(handshake.GetKey()) < insecureSymmKeySize {
+			s.logger.Printf("error while parsing ClientHello record: %s", ErrInsecureEncryptionKeySize)
+			return
+		}
+
+		serverHandshakeVerify := s.transcoder.NewHandshakeRecord()
+		serverHandshakeVerify.SetCookie(cookie)
+		serverHandshakeVerify.SetTimestamp(time.Now().UnixNano() / int64(time.Millisecond))
+
+		var handshakePayload []byte
+		handshakePayload, err = s.transcoder.MarshalHandshake(serverHandshakeVerify)
+		if err != nil {
+			s.logger.Printf("error while creating HelloVerify record: %s", err)
+			return
+		}
+
+		handshakePayload, err = s.symmCrypto.Encrypt(handshakePayload, handshake.GetKey())
+		if err != nil {
+			s.logger.Printf("error while encrypting HelloVerify record: %s", err)
+			return
+		}
+
+		handshakePayload = composeRecordBytes(HandshakeHelloVerifyRecordType, s.protocolVersion, handshakePayload)
+
+		err = s.sendToAddr(addr, handshakePayload)
+		if err != nil {
+			s.logger.Printf("error while sending HelloVerify record to the client: %s", err)
+			return
+		}
+	} else {
+		cookie := s.sessionManager.GetAddrCookieHMAC(addr, []byte(handshake.GetClientVersion()), handshake.GetSessionId(), handshake.GetRandom()) //TODO session id is empty
+		if !crypto.HMACEqual(handshake.GetCookie(), cookie) {
+			s.logger.Printf("error while validation HelloVerify record cookie: %s", ErrClientCookieIsInvalid)
+			return
+		}
+
+		if len(handshake.GetKey()) < insecureSymmKeySize {
+			s.logger.Printf("error while validating HelloVerify record key: %s", ErrInsecureEncryptionKeySize)
+			return
+		}
+
+		var token []byte
+		if len(r.Extra) > 0 {
+			token, err = s.symmCrypto.Decrypt(r.Extra, handshake.GetKey())
+			if err != nil {
+				s.logger.Printf("error while decrypting HelloVerify record token: %s", err)
+				return
+			}
+		}
+
+		var ID string
+		ID, err = s.authClient.Authenticate(ctx, token)
+		if err != nil {
+			s.logger.Printf("error while authenticating client token: %s", err)
+			return
+		}
+
+		var cl *Client
+		cl, err = s.registerClient(addr, ID, handshake.GetKey())
+		if err != nil {
+			s.logger.Printf("error while registering client: %s", err)
+			return
+		}
+
+		serverHandshakeHello := s.transcoder.NewHandshakeRecord()
+		serverHandshakeHello.SetSessionId(cl.sessionID)
+		serverHandshakeHello.SetTimestamp(time.Now().UnixNano() / int64(time.Millisecond))
+
+		var handshakePayload []byte
+		handshakePayload, err = s.transcoder.MarshalHandshake(serverHandshakeHello)
+		if err != nil {
+			s.logger.Printf("error while marshaling server hello record: %s", err)
+			return
+		}
+
+		err = s.sendToClient(cl, HandshakeServerHelloRecordType, handshakePayload)
+		if err != nil {
+			s.logger.Printf("error while sending server hello record: %s", err)
+			return
+		}
+	}
+}
+
+// handlePingRecord handles ping record and sends pong response
+func (s *Server) handlePingRecord(ctx context.Context, addr *net.UDPAddr, r *record) {
+	cl, ok := s.findClientByAddr(addr)
+	if !ok {
+		s.logger.Printf("error while authenticating ping record: %s", ErrClientAddressIsNotRegistered)
+		return
+	}
+
+	pong := s.transcoder.NewPongRecord()
+	pong.SetReceivedAt(time.Now().UnixNano())
+
+	var payload []byte
+	var err error
+	payload, err = s.symmCrypto.Decrypt(r.Body, cl.eKey)
+	if err != nil {
+		s.logger.Printf("error while decrypting ping record: %s", err)
+		return
+	}
+
+	var sessionID, body []byte
+	sessionID, body, err = parseSessionID(payload, len(cl.sessionID))
+	if err != nil {
+		s.logger.Printf("error while parsing session id for ping: %s", err)
+		return
+	}
+
+	if !cl.ValidateSessionID(sessionID) {
+		s.logger.Printf("error while validating session id for ping: %s", ErrClientSessionNotFound)
+		s.unAuthenticated(addr)
+		return
+	}
+
+	var ping encoding.PingRecord
+	ping, err = s.transcoder.UnmarshalPing(body)
+	if err != nil {
+		s.logger.Printf("error while unmarshaling ping record: %s", err)
+		return
+	}
+
+	pong.SetPingSentAt(ping.GetSentAt())
+	pong.SetSentAt(time.Now().UnixNano())
+
+	var pongPayload []byte
+	pongPayload, err = s.transcoder.MarshalPong(pong)
+	if err != nil {
+		s.logger.Printf("error while marshaling pong record: %s", err)
+		return
+	}
+
+	err = s.sendToClient(cl, PongRecordType, pongPayload)
+	if err != nil {
+		s.logger.Printf("error while sending pong record: %s", err)
+		return
+	}
+
+	now := time.Now()
+	cl.Lock()
+	cl.lastHeartbeat = &now
+	cl.Unlock()
+}
+
+// handleCustomRecord handle custom record with authorizing the record and call the handler func if is set
+func (s *Server) handleCustomRecord(ctx context.Context, addr *net.UDPAddr, r *record) {
+	cl, ok := s.findClientByAddr(addr)
+	if !ok {
+		s.logger.Printf("error while authenticating other type record: %s", ErrClientAddressIsNotRegistered)
+		s.unAuthenticated(addr)
+		return
+	}
+
+	payload, err := s.symmCrypto.Decrypt(r.Body, cl.eKey)
+	if err != nil {
+		s.logger.Printf("error while decrypting other type record: %s", err)
+		return
+	}
+
+	var sessionID, body []byte
+	sessionID, body, err = parseSessionID(payload, len(cl.sessionID))
+	if err != nil {
+		s.logger.Printf("error while parsing session id for ping: %s", err)
+		return
+	}
+
+	if !cl.ValidateSessionID(sessionID) {
+		s.logger.Printf("error while validating client session for other type record: %s", ErrClientSessionNotFound)
+		s.unAuthenticated(addr)
+		return
+	}
+
+	if s.handler != nil {
+		s.handler(cl.ID, r.Type, body)
+	}
+
+	now := time.Now()
+	cl.Lock()
+	cl.lastHeartbeat = &now
+	cl.Unlock()
 }
 
 // parseSessionID parses the session ID from the record decrypted body, the session ID must prepend to the body before encryption in the client
