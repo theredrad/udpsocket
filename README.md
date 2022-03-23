@@ -44,17 +44,19 @@ An implementation of `crypto.Asymmetric` interface to encrypt & decrypt via publ
 package main
 
 import (
-	"context"
-  "log"
-	"net"
-  "fmt"
-   "crypto/rsa"
+    "context"
+    "log"
+    "net"
+    "fmt"
+    "crypto/rsa"
+    "time"
+    "os"
   
-	"demo/auth"
-	"demo/encoding"
+    "demo/auth"
+    "demo/encoding"
 	
-  "github.com/theredrad/udpsocket"
-  "github.com/theredrad/udpsocket/crypto"
+    "github.com/theredrad/udpsocket"
+    "github.com/theredrad/udpsocket/crypto"
 )
 
 var (
@@ -67,67 +69,59 @@ var (
 )
 
 func main() {
-	f, err := auth.NewFirebaseClient(context.Background(), "firebase-config.json") // firebase implementation of auth client to validate firebase-issued tokens
-	if err != nil {
-		panic(err)
-	}
+    f, err := auth.NewFirebaseClient(context.Background(), "firebase-config.json") // firebase implementation of auth client to validate firebase-issued tokens
+    if err != nil {
+        panic(err)
+    }
+    
+    udpAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%s", udpServerIP, udpServerPort))
+    if err != nil {
+        panic(err)
+    }
+    
+    udpConn, err := net.ListenUDP("udp", udpAddr)
+    if err != nil {
+        panic(err)
+    }
+    defer udpConn.Close()
 
-	udpAddr, err = net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%s", udpServerIP, udpServerPort))
-	if err != nil {
-		panic(err)
-	}
 
-	udpConn, err = net.ListenUDP("udp", udpAddr)
-	if err != nil {
-		panic(err)
-	}
-	defer udpConn.Close()
+    pk, err = crypto.GenerateRSAKey(defaultRSAPrivateKeySize)
+    if err != nil {
+        panic(err)
+    }
+    
+    r := crypto.NewRSAFromPK(pk) // creating a new instance of the RSA implementation
+    if err != nil {
+        panic(err)
+    }
+    
+    a := crypto.NewAES(crypto.AES_CBC) // creating a new instance of the AES implementation
+    
+    t := &encoding.MessagePack{} // an implementation of msgpack for the Transcoder
+    s, err := udpsocket.NewServer(udpConn,
+        udpsocket.WithAuthClient(f),
+        udpsocket.WithTranscoder(t),
+        udpsocket.WithSymmetricCrypto(a),
+        udpsocket.WithAsymmetricCrypto(r),
+        udpsocket.WithReadBufferSize(2048),
+        udpsocket.WithMinimumPayloadSize(4),
+        udpsocket.WithProtocolVersion(1, 0),
+        udpsocket.WithHeartbeatExpiration(3*time.Second),
+        udpsocket.WithLogger(log.New(os.Stdout, "udp server: ", log.Ldate)),
+    )
+    if err != nil {
+        panic(err)
+    }
+    s.SetHandler(incomingHandler)
 
-
-	pk, err = crypto.GenerateRSAKey(defaultRSAPrivateKeySize)
-	if err != nil {
-		panic(err)
-	}
-	
-	r := crypto.NewRSAFromPK(pk) // creating a new instance of the RSA implementation
-	if err != nil {
-		panic(err)
-	}
-
-	a := crypto.NewAES(crypto.AES_CBC) // creating a new instance of the AES implementation
-
-	t := &encoding.MessagePack{} // an implementation of msgpack for the Transcoder
-	s, err := udpsocket.NewServer(udpConn, &udpsocket.Config{
-		AuthClient: f,
-		Transcoder: t,
-		SymmCrypto: a,
-		AsymmCrypto: r,
-		ReadBufferSize: 2048,
-		MinimumPayloadSize: 4,
-		ProtocolVersionMajor: 0,
-		ProtocolVersionMinor: 1,
-	})
-	if err != nil {
-		panic(err)
-	}
-	s.SetHandler(incomingHandler)
-
-	go func() { // handling the server errors
-		for {
-			uerr := <- s.Errors
-			if uerr != nil {
-				log.Printf("errors on udp server: %s\n", uerr.Error())
-			}
-		}
-	}()
-
-	go s.Serve() // start to run the server, listen to incoming records
-
-  // TODO: need to serve the public key on HTTPS (TLS) to secure the download for the client
+    go s.Serve() // start to run the server, listen to incoming records
+    
+    // TODO: need to serve the public key on HTTPS (TLS) to secure the download for the client
 }
 
 func incomingHandler(id string, t byte, p []byte) {
-	// handle the incoming
+    // handle the incoming
 }
 
 ```
