@@ -1,6 +1,6 @@
 // license that can be found in the LICENSE file.
 
-// package udpsocket is a simple UDP server to make a virtual secure channel with the clients
+// Package udpsocket is a simple UDP server to make a virtual secure channel with the clients
 package udpsocket
 
 import (
@@ -36,24 +36,21 @@ var (
 )
 
 const (
-	// reserved record types
-	HandshakeClientHelloRecordType byte = iota + 1
+	HandshakeClientHelloRecordType byte = 1 << iota
 	HandshakeHelloVerifyRecordType
 	HandshakeServerHelloRecordType
 	PingRecordType
 	PongRecordType
 	UnAuthenticated
 
-	// default RSA key size, this options is used to initiate new RSA implementation if no asymmetric encryption is passed
-	defaultRSAKeySize         int = 2048
+	defaultRSAKeySize         int = 2048 // default RSA key size, this options is used to initiate new RSA implementation if no asymmetric encryption is passed
 	defaultMinimumPayloadSize int = 3
 	defaultReadBufferSize     int = 2048
 
-	// A symmetric key smaller than 256 bits is not secure. 256-bits = 32 bytes in size
-	insecureSymmKeySize int = 32
+	insecureSymmKeySize int = 32 // A symmetric key smaller than 256 bits is not secure. 256-bits = 32 bytes in size
 )
 
-// incoming bytes is parsed to the record struct
+// incoming bytes are parsed to the record struct
 type record struct {
 	Type       byte
 	ProtoMajor uint8
@@ -62,86 +59,48 @@ type record struct {
 	Extra      []byte
 }
 
+// rawRecord is sent to the rawRecords channel when a new payload has been received
 type rawRecord struct {
 	payload []byte
 	addr    *net.UDPAddr
 }
 
-// client is an authenticated UDP client
+// Client is an authenticated UDP client
 type Client struct {
 	ID string
 
-	// Session ID is a secret byte array that indicates the client is already done the handshake process, the client must prepend these bytes into the start of each record body before encryption
-	sessionID []byte
+	sessionID []byte // Session ID is a secret byte array that indicates the client is already done the handshake process, the client must prepend these bytes into the start of each record body before encryption
 
-	// UDP address of the client
-	addr *net.UDPAddr
+	addr *net.UDPAddr // UDP address of the client
 
-	// Client encryption key to decrypt & encrypt a record body with the symmetric encryption algorithm
-	eKey []byte //encryption key
+	eKey []byte // Client encryption key to decrypt & encrypt a record body with the symmetric encryption algorithm
 
-	// Last time that a record is received from the client
-	lastHeartbeat *time.Time
+	lastHeartbeat *time.Time // last time when a record has been received from the client.
 
 	sync.Mutex
 }
 
-// The Server is a UDP listener that handles the handshake process, encryption, client authentication, sending records to the client & proxy custom record types to the handler method
+// The Server is a UDP listener that handles the handshake process, encryption, client authentication, sending records to the client & proxy custom record types to the HandlerFunc
 type Server struct {
-	// UDP connection to listen
-	conn *net.UDPConn
-
-	// an implementation of the AuthClient to authenticate the user token, if not set, no authentication will apply
-	authClient AuthClient
-
-	// an implementation of the Transcoder to encode & decode the record body, if not set, an implementation of the Protobuf will use
-	transcoder encoding.Transcoder
-
-	// an implementation of Asymmetric encryption to decrypt the body of the client handshake hello record
-	asymmCrypto crypto.Asymmetric
-
-	// an implementation of Symmetric encryption to encrypt & decrypt records body for the client after a successful handshake
-	symmCrypto crypto.Symmetric
-
-	// Buffer limit size for incoming bytes
-	readBufferSize int
-
-	// Minimum payload size to ignore too short incoming bytes
-	minimumPayloadSize int
-
-	// Expiration time of last heartbeat to delete client
-	heartbeatExpiration time.Duration
-
-	// Handler func which is called when a custom record type received
-	handler HandlerFunc
-
-	// Map of client with index of client ID
-	clients map[string]*Client
-
-	// Client garbage collector ticker
-	garbageCollectionTicker *time.Ticker
-
-	// Client garbage collector stop channel
-	garbageCollectionStop chan bool
-
-	// the Session manager generates cookie & session ID
-	sessionManager *sessionManager
-
-	// Map of client with index of IP_PORT
-	sessions map[string]*Client
-
-	// stop channel to stop listening
-	stop chan bool
-
-	// Protocol version
-	protocolVersion [2]byte
-
-	rawRecords chan rawRecord
-
-	// Logger
-	logger *log.Logger
-
-	wg *sync.WaitGroup
+	protocolVersion         [2]byte             // Protocol version
+	readBufferSize          int                 // Buffer limit size for incoming bytes
+	minimumPayloadSize      int                 // Minimum payload size to ignore too short incoming bytes
+	heartbeatExpiration     time.Duration       // Expiration time of last heartbeat to delete client
+	conn                    *net.UDPConn        // UDP connection to listen
+	authClient              AuthClient          // an implementation of the AuthClient to authenticate the user token, if not set, no authentication will apply
+	transcoder              encoding.Transcoder // an implementation of the Transcoder to encode & decode the record body, if not set, an implementation of the Protobuf will use
+	asymmCrypto             crypto.Asymmetric   // an implementation of Asymmetric encryption to decrypt the body of the client handshake hello record
+	symmCrypto              crypto.Symmetric    // an implementation of Symmetric encryption to encrypt & decrypt records body for the client after a successful handshake
+	handler                 HandlerFunc         // Handler func which is called when a custom record type received
+	clients                 map[string]*Client  // Map of client with index of client ID
+	garbageCollectionTicker *time.Ticker        // Client garbage collector ticker
+	garbageCollectionStop   chan bool           // Client garbage collector stop channel
+	sessionManager          *sessionManager     // the Session manager generates cookie & session ID
+	sessions                map[string]*Client  // Map of client with index of IP_PORT
+	rawRecords              chan rawRecord      // raw records channel
+	logger                  *log.Logger         // Logger
+	stop                    chan bool           // stop channel to stop listening
+	wg                      *sync.WaitGroup
 }
 
 // NewServer accepts UDP connection & configs & returns a new instance of the Server
@@ -205,7 +164,7 @@ func NewServer(conn *net.UDPConn, options ...Option) (*Server, error) {
 	return &s, nil
 }
 
-// Set handler function as a callback to call when a custom record type is received from the client
+// SetHandler sets the handler function as a callback to call when a custom record type is received from the client
 func (s *Server) SetHandler(f HandlerFunc) {
 	s.handler = f
 }
@@ -216,7 +175,7 @@ func (s *Server) handleRawRecords() {
 	}
 }
 
-// Start listening to the UDP port for incoming bytes & then pass it to the handleRecord method if no error is found
+// Serve starts listening to the UDP port for incoming bytes & then sends payload and sender address into the rawRecords channel if no error is found
 func (s *Server) Serve() {
 	if s.heartbeatExpiration > 0 {
 		if s.garbageCollectionTicker != nil {
@@ -234,7 +193,7 @@ func (s *Server) Serve() {
 	s.stop = make(chan bool, 1)         // reset the stop channel
 	for {
 		select {
-		case _ = <-s.stop:
+		case <-s.stop:
 			return
 		default:
 			buf := make([]byte, s.readBufferSize)
@@ -251,7 +210,6 @@ func (s *Server) Serve() {
 				payload: buf[0:n],
 				addr:    addr,
 			}
-			//go s.handleRecord(buf[0:n], addr)
 		}
 	}
 }
@@ -265,14 +223,7 @@ func (s *Server) Stop() {
 }
 
 // handlerRecord validate & parse incoming bytes to a record instance, then process it depends on the record type
-// all incoming bytes will ignore if hasn't minimum payload size (to prevent process empty or wrong formatted records)
-// HandshakeClientHello record is encrypted by the server public key & contains the client encryption key
-// if the ClientHello was valid, the server generates a unique cookie for the client address, encrypt it with the client key & then send it
-// client must send the HandshakeClientHelloVerify request (same as Hello) with the generated cookie & the token to prove that the sender address is valid
-// server validate the HelloVerify record, then authenticate the client token & if they're valid, generate a session ID, encrypt it & send it back as ServerHello record
-// after client registration, the client must prepend the Session ID before the record body unencrypted bytes, then encrypt them & compose the record
-// all custom record types will validate & authenticate, then pass to the handler method with the client ID
-// if a ping record is received, the server sends a pong record immediately
+// all incoming bytes will ignore if it doesn't meet minimum payload size (to prevent process empty or wrong formatted records)
 func (s *Server) handleRecord(record []byte, addr *net.UDPAddr) {
 	if len(record) < s.minimumPayloadSize {
 		s.logger.Println(ErrMinimumPayloadSizeLimit)
@@ -296,6 +247,11 @@ func (s *Server) handleRecord(record []byte, addr *net.UDPAddr) {
 }
 
 // handleHandshakeRecord handles handshake process
+// HandshakeClientHello record is encrypted by the server public key & contains the client encryption key
+// if the ClientHello was valid, the server generates a unique cookie for the client address, encrypt it with the client key & then send it
+// client must send the HandshakeClientHelloVerify request (same as Hello) with the generated cookie & the token to prove that the sender address is valid
+// server validate the HelloVerify record, then authenticate the client token & if they're valid, generate a session ID, encrypt it & send it back as ServerHello record
+// after client registration, the client must prepend the Session ID before the record body unencrypted bytes, then encrypt them & compose the record
 func (s *Server) handleHandshakeRecord(ctx context.Context, addr *net.UDPAddr, r *record) {
 	var payload []byte
 	payload, err := s.asymmCrypto.Decrypt(r.Body)
@@ -557,7 +513,7 @@ func (s *Server) findClientByAddr(addr *net.UDPAddr) (*Client, bool) {
 	return cl, true
 }
 
-// sends a record bytes to the UDP address
+// sendToAddr writes record bytes to the UDP address
 func (s *Server) sendToAddr(addr *net.UDPAddr, record []byte) error {
 	_, err := s.conn.WriteToUDP(record, addr)
 	return err
@@ -573,7 +529,7 @@ func (s *Server) sendToClient(client *Client, typ byte, payload []byte) error {
 	return s.sendToAddr(client.addr, payload)
 }
 
-// a method to send byte array to the Client by ID
+// SendToClientByID sends bytes to the Client by ID
 func (s *Server) SendToClientByID(clientID string, typ byte, payload []byte) error {
 	cl, ok := s.clients[clientID]
 	if !ok {
@@ -602,7 +558,7 @@ func (s *Server) clientGarbageCollection() {
 	}
 }
 
-// a method to broadcast byte array to all registered Clients
+// BroadcastToClients broadcasts bytes to all registered Clients
 func (s *Server) BroadcastToClients(typ byte, payload []byte) {
 	for _, cl := range s.clients {
 		s.wg.Add(1)
@@ -625,12 +581,12 @@ func (s *Server) unAuthenticated(addr *net.UDPAddr) {
 	}
 }
 
-// composes record bytes, prepend the record header (type & protocol version) to the body
+// composeRecordBytes composes record bytes, prepend the record header (type & protocol version) to the body
 func composeRecordBytes(typ byte, version [2]byte, payload []byte) []byte {
 	return append([]byte{typ, version[0], version[1]}, payload...)
 }
 
-// parses received bytes to the record struct
+// parseRecord parses received bytes to the record struct
 func parseRecord(rec []byte) (*record, error) {
 	if rec[0] != HandshakeClientHelloRecordType {
 		if len(rec) < 3 {
@@ -660,7 +616,7 @@ func parseRecord(rec []byte) (*record, error) {
 	}, nil
 }
 
-// compares the client session ID with the given one
+// ValidateSessionID compares the client session ID with the given one
 func (c *Client) ValidateSessionID(sessionID []byte) bool {
 	if bytes.Equal(c.sessionID, sessionID) {
 		return true
