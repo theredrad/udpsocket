@@ -211,11 +211,8 @@ func (s *Server) SetHandler(f HandlerFunc) {
 }
 
 func (s *Server) handleRawRecords() {
-	for {
-		select {
-		case r := <-s.rawRecords:
-			s.handleRecord(r.payload, r.addr)
-		}
+	for r := range s.rawRecords {
+		s.handleRecord(r.payload, r.addr)
 	}
 }
 
@@ -230,6 +227,7 @@ func (s *Server) Serve() {
 		go s.clientGarbageCollection()
 	}
 
+	s.rawRecords = make(chan rawRecord)
 	go s.handleRawRecords()
 
 	s.conn.SetReadDeadline(time.Time{}) // reset read deadline @TODO: handle error
@@ -262,6 +260,7 @@ func (s *Server) Stop() {
 	s.conn.SetReadDeadline(time.Unix(0, 1)) // set read deadline to a longtime ago @TODO: handle error
 	s.stop <- true
 	s.garbageCollectionStop <- true
+	close(s.rawRecords)
 	s.wg.Wait()
 }
 
