@@ -16,6 +16,21 @@ import (
 	"time"
 )
 
+var (
+	serverAddr = &net.UDPAddr{IP: net.IP{127, 0, 0, 1}, Port: 9001}
+	clientAddr = &net.UDPAddr{IP: net.IP{127, 0, 0, 1}, Port: 9002}
+
+	validToken  = []byte("valid_token")
+	validUserID = "valid_user_id"
+
+	aesKey        = []byte{113, 110, 25, 53, 11, 53, 68, 33, 17, 36, 22, 7, 125, 11, 35, 16, 83, 61, 59, 49, 31, 22, 69, 17, 24, 125, 11, 35, 16, 83, 61, 59}
+	clientRandom  = []byte{12, 101, 30, 21, 8, 45, 86, 10, 125, 9, 49, 31, 22, 69, 36, 22, 7, 12, 83, 61, 5, 17, 24, 125, 11, 35, 15, 11, 35, 16, 6, 71, 19, 13}
+	clientRandom2 = []byte{12, 101, 30, 21, 8, 45, 86, 10, 125, 9, 49, 31, 22, 69, 36, 22, 7, 12, 83, 61, 5, 17, 24, 125, 11, 35, 15, 11, 35, 16, 6, 71, 19, 10}
+	clientVersion = "0.1"
+
+	testRecordType byte = 13
+)
+
 type udpRecord struct {
 	N     int
 	Error error
@@ -43,14 +58,14 @@ type client struct {
 	config *clientConfig
 }
 
-func newClient(t *testing.T, conn *net.UDPConn, pk *rsa.PrivateKey, sm *sessionManager) *client {
+func newClient(a AuthClient, conn *net.UDPConn, pk *rsa.PrivateKey, sm *sessionManager) *client {
 	return &client{
 		conn: conn,
 		config: &clientConfig{
 			serverAddr:           serverAddr,
 			aesKey:               aesKey,
 			asymmCrypto:          crypto.NewRSAEncryptorFromPK(&pk.PublicKey),
-			authClient:           authMock(t),
+			authClient:           a,
 			transcoder:           &pb.Protobuf{},
 			symmCrypto:           crypto.NewAES(crypto.AES_CBC),
 			readBufferSize:       2048,
@@ -169,21 +184,6 @@ func (c *client) composeRecord(typ byte, sessionID, payload []byte) ([]byte, err
 	return p, nil
 }
 
-var (
-	serverAddr = &net.UDPAddr{IP: net.IP{127, 0, 0, 1}, Port: 9001}
-	clientAddr = &net.UDPAddr{IP: net.IP{127, 0, 0, 1}, Port: 9002}
-
-	validToken  = []byte("valid_token")
-	validUserID = "valid_user_id"
-
-	aesKey        = []byte{113, 110, 25, 53, 11, 53, 68, 33, 17, 36, 22, 7, 125, 11, 35, 16, 83, 61, 59, 49, 31, 22, 69, 17, 24, 125, 11, 35, 16, 83, 61, 59}
-	clientRandom  = []byte{12, 101, 30, 21, 8, 45, 86, 10, 125, 9, 49, 31, 22, 69, 36, 22, 7, 12, 83, 61, 5, 17, 24, 125, 11, 35, 15, 11, 35, 16, 6, 71, 19, 13}
-	clientRandom2 = []byte{12, 101, 30, 21, 8, 45, 86, 10, 125, 9, 49, 31, 22, 69, 36, 22, 7, 12, 83, 61, 5, 17, 24, 125, 11, 35, 15, 11, 35, 16, 6, 71, 19, 10}
-	clientVersion = "0.1"
-
-	testRecordType byte = 13
-)
-
 func listenUDP(t *testing.T, addr *net.UDPAddr) (*net.UDPConn, func()) {
 	conn, err := net.ListenUDP("udp", addr)
 	if err != nil {
@@ -196,9 +196,9 @@ func listenUDP(t *testing.T, addr *net.UDPAddr) (*net.UDPConn, func()) {
 	}
 }
 
-func newServerConfig(t *testing.T, pk *rsa.PrivateKey) []Option {
+func newServerConfig(a AuthClient, pk *rsa.PrivateKey) []Option {
 	return []Option{
-		WithAuthClient(authMock(t)),
+		WithAuthClient(a),
 		WithTranscoder(&pb.Protobuf{}),
 		WithSymmetricCrypto(crypto.NewAES(crypto.AES_CBC)),
 		WithAsymmetricCrypto(crypto.NewRSAFromPK(pk)),
@@ -208,22 +208,18 @@ func newServerConfig(t *testing.T, pk *rsa.PrivateKey) []Option {
 	}
 }
 
-func newRSAKey(t *testing.T) *rsa.PrivateKey {
+func TestServer_Handshake(t *testing.T) {
+	serverConn, serverClose := listenUDP(t, serverAddr)
+	defer serverClose()
+
 	pk, err := crypto.GenerateRSAKey(2048)
 	if err != nil {
 		t.Errorf("expected new private key, got err: %s", err)
 		t.FailNow()
 	}
-	return pk
-}
 
-func TestServer_Handshake(t *testing.T) {
-	serverConn, serverClose := listenUDP(t, serverAddr)
-	defer serverClose()
-
-	pk := newRSAKey(t)
-
-	cfg := newServerConfig(t, pk)
+	authClient := authMock(t)
+	cfg := newServerConfig(authClient, pk)
 	server, err := NewServer(serverConn, cfg...)
 	if err != nil {
 		t.Errorf("expected new server, got err: %s", err)
@@ -234,7 +230,7 @@ func TestServer_Handshake(t *testing.T) {
 	clientConn, clientClose := listenUDP(t, clientAddr)
 	defer clientClose()
 
-	cl := newClient(t, clientConn, pk, server.sessionManager)
+	cl := newClient(authClient, clientConn, pk, server.sessionManager)
 
 	tests := []struct {
 		name         string
@@ -382,9 +378,14 @@ func TestServer_Timeout(t *testing.T) {
 	serverConn, serverClose := listenUDP(t, serverAddr)
 	defer serverClose()
 
-	pk := newRSAKey(t)
+	pk, err := crypto.GenerateRSAKey(2048)
+	if err != nil {
+		t.Errorf("expected new private key, got err: %s", err)
+		t.FailNow()
+	}
 
-	cfg := newServerConfig(t, pk)
+	authClient := authMock(t)
+	cfg := newServerConfig(authClient, pk)
 	server, err := NewServer(serverConn, append(cfg, WithHeartbeatExpiration(1*time.Second))...)
 	if err != nil {
 		t.Errorf("expected new server, got err: %s", err)
@@ -401,7 +402,7 @@ func TestServer_Timeout(t *testing.T) {
 	clientConn, clientClose := listenUDP(t, clientAddr)
 	defer clientClose()
 
-	cl := newClient(t, clientConn, pk, server.sessionManager)
+	cl := newClient(authClient, clientConn, pk, server.sessionManager)
 
 	tests := []struct {
 		name    string
@@ -476,13 +477,12 @@ func TestServer_Timeout(t *testing.T) {
 				}
 
 				ctx, cancel = context.WithTimeout(context.Background(), 500*time.Millisecond)
-				defer cancel()
-
 				err = waitForCallback(ctx, callbackChan)
 				if (err != nil) != tt.wantErr {
 					t.Errorf("want error: %t, got: %v", tt.wantErr, err)
 					t.FailNow()
 				}
+				cancel()
 			}
 		})
 	}
@@ -492,9 +492,14 @@ func TestServer_Stop(t *testing.T) {
 	serverConn, serverClose := listenUDP(t, serverAddr)
 	defer serverClose()
 
-	pk := newRSAKey(t)
+	pk, err := crypto.GenerateRSAKey(2048)
+	if err != nil {
+		t.Errorf("expected new private key, got err: %s", err)
+		t.FailNow()
+	}
 
-	cfg := newServerConfig(t, pk)
+	authClient := authMock(t)
+	cfg := newServerConfig(authClient, pk)
 	server, err := NewServer(serverConn, append(cfg, WithHeartbeatExpiration(1*time.Second))...)
 	if err != nil {
 		t.Errorf("expected new server, got err: %s", err)
@@ -519,15 +524,6 @@ func TestServer_Stop(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "stop",
-			preFunc: func() {
-				go server.Serve()
-				time.Sleep(200 * time.Millisecond)
-				server.Stop()
-			},
-			wantErr: true,
-		},
-		{
 			name: "continuous_start_stop",
 			preFunc: func() {
 				go server.Serve()
@@ -541,12 +537,21 @@ func TestServer_Stop(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name: "stop",
+			preFunc: func() {
+				go server.Serve()
+				time.Sleep(200 * time.Millisecond)
+				server.Stop()
+			},
+			wantErr: true,
+		},
 	}
 
 	clientConn, clientClose := listenUDP(t, clientAddr)
 	defer clientClose()
 
-	cl := newClient(t, clientConn, pk, server.sessionManager)
+	cl := newClient(authClient, clientConn, pk, server.sessionManager)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -584,9 +589,14 @@ func TestServer_BroadcastToClients(t *testing.T) {
 	serverConn, serverClose := listenUDP(t, serverAddr)
 	defer serverClose()
 
-	pk := newRSAKey(t)
+	pk, err := crypto.GenerateRSAKey(2048)
+	if err != nil {
+		t.Errorf("expected new private key, got err: %s", err)
+		t.FailNow()
+	}
 
-	cfg := newServerConfig(t, pk)
+	authClient := authMock(t)
+	cfg := newServerConfig(authClient, pk)
 	server, err := NewServer(serverConn, append(cfg, WithHeartbeatExpiration(1*time.Second))...)
 	if err != nil {
 		t.Errorf("expected new server, got err: %s", err)
@@ -597,7 +607,7 @@ func TestServer_BroadcastToClients(t *testing.T) {
 	clientConn, clientClose := listenUDP(t, clientAddr)
 	defer clientClose()
 
-	cl := newClient(t, clientConn, pk, server.sessionManager)
+	cl := newClient(authClient, clientConn, pk, server.sessionManager)
 
 	_, err = server.registerClient(clientAddr, uuid.New().String(), aesKey)
 	if err != nil {
@@ -627,6 +637,60 @@ func TestServer_BroadcastToClients(t *testing.T) {
 	}
 }
 
+func BenchmarkServer_handleHandshake(b *testing.B) {
+	serverConn, err := net.ListenUDP("udp", serverAddr)
+	if err != nil {
+		b.Errorf("expected server conn, got err: %s", err)
+		b.FailNow()
+	}
+	defer serverConn.Close()
+
+	pk, err := crypto.GenerateRSAKey(2048)
+	if err != nil {
+		b.Errorf("expected new private key, got err: %s", err)
+		b.FailNow()
+	}
+
+	authClient := authMock(b)
+	cfg := newServerConfig(authClient, pk)
+	server, err := NewServer(serverConn, append(cfg, WithHeartbeatExpiration(1*time.Second))...)
+	if err != nil {
+		b.Errorf("expected new server, got err: %s", err)
+		b.FailNow()
+	}
+
+	_, err = server.registerClient(clientAddr, uuid.New().String(), aesKey)
+	if err != nil {
+		b.Errorf("expected new client, got err: %s", err)
+		b.FailNow()
+	}
+
+	cl := newClient(authClient, nil, pk, server.sessionManager)
+	msg, err := cl.composeHandshakeRecord(&pb.Handshake{
+		Key:           cl.config.aesKey,
+		Random:        clientRandom2,
+		ClientVersion: clientVersion,
+		Cookie:        cl.config.sessionManager.GetAddrCookieHMAC(clientAddr, []byte(clientVersion), nil, clientRandom),
+	}, nil)
+	if err != nil {
+		b.Errorf("expected handshake record, got err: %s", err)
+		b.FailNow()
+	}
+
+	b.ResetTimer()
+
+	msg = make([]byte, 259)
+	msg[0] = 1    // record type
+	msg[1] = 1    // record major protocol version
+	msg[2] = 0    // record minor protocol version
+	msg[189] = 21 // random message
+	msg[59] = 11  // random message
+
+	for i := 0; i < b.N; i++ {
+		server.handleRecord(msg, clientAddr)
+	}
+}
+
 func waitForCallback(ctx context.Context, callbackChan chan byte) error {
 	select {
 	case <-ctx.Done():
@@ -648,7 +712,7 @@ func handleServerError(t *testing.T, errChan chan error) {
 	}
 }
 
-func authMock(t *testing.T) AuthClient {
+func authMock(t gomock.TestReporter) AuthClient {
 	ctrl := gomock.NewController(t)
 	a := mocks.NewMockAuthClient(ctrl)
 	a.EXPECT().Authenticate(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, token []byte) (string, error) {
