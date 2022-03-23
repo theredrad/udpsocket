@@ -6,14 +6,26 @@ The `udpsocket`  supports a mimic of DTLS handshake, cryptography, session manag
 
 ## Using
 
-The `udpsocket` server requires some parameters to initiate:
+The `udpsocket` server accepts some parameters to initiate:
 
 * An instance of `*net.UDPConn`
-* An instance of `udpsocket.Config`
+* An array of options
 
-### Config
+### Options
 
-Passing the config object is not required & if no config object pass, the default config will be used.
+Options can be passed using pre-defined functions:
+
+```go
+udpsocket.WithAuthClient()
+udpsocket.WithTranscoder()
+udpsocket.WithSymmetricCrypto()
+udpsocket.WithAsymmetricCrypto()
+udpsocket.WithReadBufferSize()
+udpsocket.WithMinimumPayloadSize()
+udpsocket.WithProtocolVersion()
+udpsocket.WithHeartbeatExpiration()
+udpsocket.WithLogger()
+```
 
 #### AuthClient
 
